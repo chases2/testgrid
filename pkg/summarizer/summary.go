@@ -105,7 +105,7 @@ func Update(ctx context.Context, client *storage.Client, path gcs.Path, concurre
 					errCh <- errors.New(dash.Name)
 					continue
 				}
-				if err := writeSummary(ctx, client, *path, sum); err != nil {
+				if err := WriteSummary(ctx, client, *path, sum); err != nil {
 					log.WithError(err).Error("Cannot write summary")
 					errCh <- errors.New(dash.Name)
 					continue
@@ -154,7 +154,8 @@ func summaryPath(name string) string {
 	return "summary-" + normalizer.ReplaceAllString(strings.ToLower(name), "")
 }
 
-func writeSummary(ctx context.Context, client *storage.Client, path gcs.Path, sum *summarypb.DashboardSummary) error {
+// TODO(chases2): Move this and ReadSummary into a separate file in the same package
+func WriteSummary(ctx context.Context, client *storage.Client, path gcs.Path, sum *summarypb.DashboardSummary) error {
 	buf, err := proto.Marshal(sum)
 	if err != nil {
 		return fmt.Errorf("marshal: %v", err)
