@@ -18,6 +18,7 @@ filegroup(
         ":package-srcs",
         "//cluster/canary:all-srcs",
         "//cluster/prod:all-srcs",
+        "//cmd/alerter:all-srcs",
         "//cmd/summarizer:all-srcs",
         "//cmd/updater:all-srcs",
         "//config:all-srcs",
