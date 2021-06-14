@@ -66,6 +66,38 @@ func GCS(groupTimeout, buildTimeout time.Duration, concurrency int, write bool, 
 	}
 }
 
+// InMem returns a in mem GroupUpdater
+func InMem(groupTimeout, buildTimeout time.Duration, write bool, cols []InflatedColumn, issues map[string][]string) GroupUpdater {
+	return func(parent context.Context, log logrus.FieldLogger, client gcs.Client, tg *configpb.TestGroup, gridPath gcs.Path) error {
+		if !tg.UseKubernetesClient {
+			log.Debug("Skipping non-kubernetes client group")
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(parent, groupTimeout)
+		defer cancel()
+		grid := constructGrid(log, tg, cols, issues)
+		buf, err := marshalGrid(grid)
+		if err != nil {
+			return fmt.Errorf("marshal grid: %w", err)
+		}
+		log = log.WithField("url", gridPath).WithField("bytes", len(buf))
+		if !write {
+			log.Debug("Skipping write")
+		} else {
+			log.Debug("Writing")
+			// TODO(fejta): configurable cache value
+			if err := client.Upload(ctx, gridPath, buf, gcs.DefaultACL, "no-cache"); err != nil {
+				return fmt.Errorf("upload: %w", err)
+			}
+		}
+		log.WithFields(logrus.Fields{
+			"cols": len(grid.Columns),
+			"rows": len(grid.Rows),
+		}).Info("Wrote grid")
+		return nil
+	}
+}
+
 // sortGroups sorts test groups by last update time, returning the current generation ID for each group.
 func sortGroups(ctx context.Context, log logrus.FieldLogger, client gcs.Stater, configPath gcs.Path, gridPrefix string, groups []*configpb.TestGroup) (map[string]int64, error) {
 	groupedPaths := make(map[gcs.Path]*configpb.TestGroup, len(groups))
@@ -399,6 +431,29 @@ func SortStarted(_ *configpb.TestGroup, cols []InflatedColumn) {
 	sort.SliceStable(cols, func(i, j int) bool {
 		return cols[i].Column.Started > cols[j].Column.Started
 	})
+}
+
+func ConstructGrid(ctx context.Context, log logrus.FieldLogger, client gcs.Client, tg *configpb.TestGroup, gridPath gcs.Path, write bool, cols []InflatedColumn, issues map[string][]string) error {
+	grid := constructGrid(log, tg, cols, issues)
+	buf, err := marshalGrid(grid)
+	if err != nil {
+		return fmt.Errorf("marshal grid: %w", err)
+	}
+	log = log.WithField("url", gridPath).WithField("bytes", len(buf))
+	if !write {
+		log.Debug("Skipping write")
+	} else {
+		log.Debug("Writing")
+		// TODO(fejta): configurable cache value
+		if err := client.Upload(ctx, gridPath, buf, gcs.DefaultACL, "no-cache"); err != nil {
+			return fmt.Errorf("upload: %w", err)
+		}
+	}
+	log.WithFields(logrus.Fields{
+		"cols": len(grid.Columns),
+		"rows": len(grid.Rows),
+	}).Info("Wrote grid")
+	return nil
 }
 
 // InflateDropAppend updates groups by downloading the existing grid, dropping old rows and appending new ones.
