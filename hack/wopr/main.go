@@ -14,14 +14,26 @@ const (
 )
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
-	//TODO: pick a game
-	io.WriteString(w, "Hello, world!\n")
+	io.WriteString(w, `
+<html>
+<head>
+<style>
+
+</style>
+</head>
+<body>
+SHALL WE PLAY A GAME?
+
+<a href="/toe/new">Tic-tac-toe</button>
+</body>
+</html>
+`)
 }
 
 func main() {
 	mux := http.NewServeMux()
+	mux.Handle("/toe/", http.StripPrefix("/toe", tictactoe.CreateMux()))
 	mux.HandleFunc("/", indexHandler)
-	mux.Handle("/toe", http.StripPrefix("/toe", tictactoe.CreateMux()))
 
 	fmt.Printf("Listening on :%d\n", PORT)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", PORT), mux))
