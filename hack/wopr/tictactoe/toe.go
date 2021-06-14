@@ -3,12 +3,19 @@ package tictactoe
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 )
 
 const (
 	INSTANCE   = "test"
 	BOARD_SIZE = 3
+
+	PARAM_INST = "g"
+	PARAM_ROW  = "r"
+	PARAM_COL  = "c"
+
+	TG_INSTANCE_FMT = "https://testgrid.k8s.io/r/k8s-testgrid-hackathon/everyone#%s&width=20&sort-by-name=&embed="
 )
 
 type Value int
@@ -19,10 +26,23 @@ const (
 	O
 )
 
+func valueToString(v Value) string {
+	switch v {
+	case EMPTY:
+		return "No one"
+	case X:
+		return "X"
+	case O:
+		return "O"
+	}
+	return "AAAAAAAAAAAGGGGGHGGHGHGHGHGHGHG"
+}
+
 type game struct {
 	// row, col
 	board   [][]Value
 	turn    Value
+	winner  Value
 	message string
 }
 
@@ -38,7 +58,10 @@ func newGame() *game {
 	}
 }
 
-func (g *game) makeMove(row, col int) error {
+func (g *game) tryMove(row, col int) error {
+	if g.winner != EMPTY {
+		return fmt.Errorf("the game is over, %s won", valueToString(g.winner))
+	}
 	if row >= BOARD_SIZE || row < 0 {
 		return fmt.Errorf("board row (%d) must be between 0 and %d", row, BOARD_SIZE)
 	}
@@ -58,7 +81,17 @@ func (g *game) makeMove(row, col int) error {
 	return nil
 }
 
-//check winner
+// Tries to make a move. If there is an error or the game is one, the banner is updated.
+func (g *game) makeMove(row, col int) {
+	if err := g.tryMove(row, col); err != nil {
+		g.message = fmt.Sprintf("Invalid move: %v.", err)
+	}
+	if winner := g.isWin(); winner != EMPTY {
+		g.winner = winner
+		g.message = fmt.Sprintf("GAME OVER: the winner is %s!", valueToString(winner))
+	}
+}
+
 func (g *game) isWin() Value {
 	// check rows
 	for row := 0; row < BOARD_SIZE; row++ {
@@ -121,18 +154,41 @@ type Server struct {
 }
 
 func (s *Server) tryMove(w http.ResponseWriter, r *http.Request) {
+	// parameters: instance, row, col
+	params := r.URL.Query()
+	instance := params.Get(PARAM_INST)
+	row, err := strconv.Atoi(params.Get(PARAM_ROW))
+	if err != nil {
+		http.Error(w, "Unknown or unparsable row.", http.StatusBadRequest)
+		return
+	}
+	col, err := strconv.Atoi(params.Get(PARAM_COL))
+	if err != nil {
+		http.Error(w, "Unknown or unparsable col.", http.StatusBadRequest)
+		return
+	}
+
 	s.Lock()
 	defer s.Unlock()
-	// parameters: instance, row, col
 
-	// output:
-	// 	bad move, game end => update banner
-	//  ok move => update board
+	g, ok := s.instances[instance]
+	if !ok {
+		http.Error(w, "Unknown game instance.", http.StatusBadRequest)
+		return
+	}
 
-	// If we have an AI: make a move for that too
+	g.makeMove(row, col)
 
-	// Write game state to GCS then redirect to TG (where request came from)
+	// TODO: Have the AI make a move (if player didn't already win)
 
+	// Write game state to GCS
+	if err := s.writeStateGCS(instance); err != nil {
+		http.Error(w, "Error writing state to GCS.", http.StatusInternalServerError)
+		return
+	}
+
+	// Redirect to TG (where request came from)
+	http.Redirect(w, r, fmt.Sprintf(TG_INSTANCE_FMT, instance), http.StatusFound)
 }
 
 func (s *Server) newGame(w http.ResponseWriter, r *http.Request) {
