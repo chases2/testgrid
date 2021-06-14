@@ -5,10 +5,15 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+
+	"github.com/GoogleCloudPlatform/testgrid/pkg/updater"
+
+	statepb "github.com/GoogleCloudPlatform/testgrid/pb/state"
+	statuspb "github.com/GoogleCloudPlatform/testgrid/pb/test_status"
 )
 
 const (
-	INSTANCE   = "test"
+	INSTANCE   = "e-blackwelder"
 	BOARD_SIZE = 3
 
 	PARAM_INST = "g"
@@ -28,14 +33,30 @@ const (
 
 func valueToString(v Value) string {
 	switch v {
-	case EMPTY:
-		return "No one"
 	case X:
 		return "X"
 	case O:
 		return "O"
 	}
-	return "AAAAAAAAAAAGGGGGHGGHGHGHGHGHGHG"
+	return " "
+}
+
+func valueToResult(v Value) statuspb.TestStatus {
+	switch v {
+	case X:
+		return statuspb.TestStatus_PASS
+	case O:
+		return statuspb.TestStatus_FAIL
+	}
+	return statuspb.TestStatus_NO_RESULT
+}
+
+func valueToMessage(v Value) string {
+	switch v {
+	case EMPTY:
+		return "Click Me!"
+	}
+	return fmt.Sprintf("Already played by %s", valueToString(v))
 }
 
 type game struct {
@@ -90,6 +111,32 @@ func (g *game) makeMove(row, col int) {
 		g.winner = winner
 		g.message = fmt.Sprintf("GAME OVER: the winner is %s!", valueToString(winner))
 	}
+}
+
+func (g *game) outputGCS() []updater.InflatedColumn {
+	res := []updater.InflatedColumn{}
+	for col := 0; col < BOARD_SIZE; col++ {
+		cells := map[string]updater.Cell{}
+		pb := &statepb.Column{
+			Build: strconv.Itoa(col),
+			Name:  strconv.Itoa(col),
+		}
+
+		for row := 0; row < BOARD_SIZE; row++ {
+			val := g.board[row][col]
+			id := fmt.Sprintf("%d,%d", row, col)
+			cells[strconv.Itoa(row)] = updater.Cell{
+				Result:  valueToResult(val),
+				Icon:    valueToString(val),
+				CellID:  id,
+				ID:      id,
+				Message: valueToMessage(val),
+			}
+		}
+
+		res = append(res, updater.InflatedColumn{Column: pb, Cells: cells})
+	}
+	return res
 }
 
 func (g *game) isWin() Value {
@@ -198,6 +245,7 @@ func (s *Server) newGame(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeStateGCS(instance string) error {
+	// output := s.instances[instance].outputGCS()
 	// TODO: handoff
 	return nil
 }
