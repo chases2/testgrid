@@ -18,6 +18,7 @@ package hackupdater
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/testgrid/pkg/updater"
@@ -58,4 +59,49 @@ func Update(ctx context.Context, creds string, confirm bool, cols []updater.Infl
 	}
 	cycle.Set(int64(time.Since(start).Seconds()))
 	logrus.Infof("Update completed in %s", time.Since(start))
+}
+
+// TODO: more letters to be added
+var letterMap = map[string]string{
+	"A": `  .  
+ . . 
+.   .
+.....
+.   .`,
+	"B": `.... 
+.   .
+.....
+.   .
+.... `,
+	"C": ` ... 
+.   .
+.    
+.   .
+ ... `,
+}
+
+func ASCII(s string) [][]bool {
+	var out [][]bool
+	if len(s) > 1 {
+		out = make([][]bool, 5)
+		// combine
+		for _, c := range s {
+			for i, line := range ASCII(string(c)) {
+				out[i] = append(out[i], line...)
+			}
+		}
+	} else {
+		for _, line := range strings.Split(string(letterMap[s]), "\n") {
+			var boolLine []bool
+			for _, c := range line {
+				var b bool
+				if string(c) == " " {
+					b = true // TODO: not sure what to prefer
+				}
+				boolLine = append(boolLine, b)
+			}
+			out = append(out, boolLine)
+		}
+	}
+	return out
 }

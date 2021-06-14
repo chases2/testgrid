@@ -49,6 +49,7 @@ type options struct {
 	buildTimeout     time.Duration
 	gridPrefix       string
 	pixelsPath       string
+	pureString       string
 
 	debug    bool
 	trace    bool
@@ -90,6 +91,7 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 	fs.DurationVar(&o.buildTimeout, "build-timeout", 3*time.Minute, "Maximum time to wait to read each build")
 	fs.StringVar(&o.gridPrefix, "grid-prefix", "grid", "Join this with the grid name to create the GCS suffix")
 	fs.StringVar(&o.pixelsPath, "pixels-path", "", "Path of pixels input")
+	fs.StringVar(&o.pureString, "pure-string", "", "Strings input")
 
 	fs.BoolVar(&o.debug, "debug", false, "Log debug lines if set")
 	fs.BoolVar(&o.trace, "trace", false, "Log trace and debug lines if set")
@@ -184,9 +186,15 @@ func main() {
 		"build": opt.buildConcurrency,
 	}).Info("Configured concurrency")
 
-	pixels, err := readPixels(opt.pixelsPath)
-	if err != nil {
-		logrus.Fatalf("Failed to read pixels file %s: %v", opt.pixelsPath, err)
+	var cols []updater.InflatedColumn
+	if len(opt.pixelsPath) > 0 {
+		pixels, err := readPixels(opt.pixelsPath)
+		if err != nil {
+			logrus.Fatalf("Failed to read pixels file %s: %v", opt.pixelsPath, err)
+		}
+		cols = convert(pixels)
+	} else if len(opt.pureString) > 0 {
+		cols = convert(hackupdater.ASCII(opt.pureString))
 	}
-	hackupdater.Update(ctx, opt.creds, opt.confirm, convert(pixels), nil, opt.config, opt.group)
+	hackupdater.Update(ctx, opt.creds, opt.confirm, cols, nil, opt.config, opt.group)
 }
