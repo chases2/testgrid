@@ -31,6 +31,24 @@ func TestIsWin(t *testing.T) {
 			},
 			expected: X,
 		},
+		{
+			name: "horizontal",
+			input: [][]Value{
+				{X, EMPTY, EMPTY},
+				{X, O, EMPTY},
+				{X, O, O},
+			},
+			expected: X,
+		},
+		{
+			name: "vertical",
+			input: [][]Value{
+				{X, X, X},
+				{EMPTY, O, EMPTY},
+				{EMPTY, EMPTY, O},
+			},
+			expected: X,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
