@@ -67,7 +67,7 @@ func GCS(groupTimeout, buildTimeout time.Duration, concurrency int, write bool, 
 }
 
 // InMem returns a in mem GroupUpdater
-func InMem(groupTimeout, buildTimeout time.Duration, write bool, cols []InflatedColumn, issues map[string][]string) GroupUpdater {
+func InMem(groupTimeout time.Duration, write bool, cols []InflatedColumn, issues map[string][]string) GroupUpdater {
 	return func(parent context.Context, log logrus.FieldLogger, client gcs.Client, tg *configpb.TestGroup, gridPath gcs.Path) error {
 		if !tg.UseKubernetesClient {
 			log.Debug("Skipping non-kubernetes client group")

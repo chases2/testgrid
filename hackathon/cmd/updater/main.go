@@ -28,10 +28,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/hackupdater"
 	"github.com/GoogleCloudPlatform/testgrid/pb/test_status"
 	"github.com/GoogleCloudPlatform/testgrid/pkg/updater"
 	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
-	"github.com/GoogleCloudPlatform/testgrid/util/metrics"
 
 	"github.com/sirupsen/logrus"
 )
@@ -179,8 +179,6 @@ func main() {
 	}
 	defer storageClient.Close()
 
-	client := gcs.NewClient(storageClient)
-
 	logrus.WithFields(logrus.Fields{
 		"group": opt.groupConcurrency,
 		"build": opt.buildConcurrency,
@@ -190,30 +188,5 @@ func main() {
 	if err != nil {
 		logrus.Fatalf("Failed to read pixels file %s: %v", opt.pixelsPath, err)
 	}
-	groupUpdater := updater.InMem(opt.groupTimeout, opt.buildTimeout, opt.confirm, convert(pixels), nil)
-	cycle := metrics.NewLogInt64("cycle_duration", "How long an update cycle took, in seconds.", logrus.New())
-	updateOnce := func() {
-		start := time.Now()
-		if err := updater.Update(ctx, client, opt.config, opt.gridPrefix, opt.groupConcurrency, opt.group, groupUpdater, opt.confirm); err != nil {
-			logrus.WithError(err).Error("Could not update")
-		}
-		cycle.Set(int64(time.Since(start).Seconds()))
-		logrus.Infof("Update completed in %s", time.Since(start))
-	}
-
-	updateOnce()
-	if opt.wait == 0 {
-		return
-	}
-	timer := time.NewTimer(opt.wait)
-	defer timer.Stop()
-	for range timer.C {
-		until := time.Now().Add(opt.wait).Round(time.Second)
-		timer.Reset(opt.wait)
-		updateOnce()
-		logrus.WithFields(logrus.Fields{
-			"wait":  opt.wait,
-			"until": until,
-		}).Info("Sleeping...")
-	}
+	hackupdater.Update(ctx, opt.creds, opt.confirm, convert(pixels), nil, opt.config, opt.group)
 }
