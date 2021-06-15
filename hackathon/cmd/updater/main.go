@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"io/ioutil"
 	"os"
 	"runtime"
@@ -52,6 +53,9 @@ type options struct {
 	gridPrefix       string
 	pixelsPath       string
 	imagePath        string
+
+	tileSize    int
+	tilePattern string
 
 	debug    bool
 	trace    bool
@@ -92,8 +96,11 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 	fs.DurationVar(&o.groupTimeout, "group-timeout", 10*time.Minute, "Maximum time to wait for each group to update")
 	fs.DurationVar(&o.buildTimeout, "build-timeout", 3*time.Minute, "Maximum time to wait to read each build")
 	fs.StringVar(&o.gridPrefix, "grid-prefix", "grid", "Join this with the grid name to create the GCS suffix")
+
 	fs.StringVar(&o.pixelsPath, "pixels-path", "", "Path of pixels input")
 	fs.StringVar(&o.imagePath, "image-path", "", "Path of image input")
+	fs.IntVar(&o.tileSize, "tile-size", 0, "pixel length of each tile in image if set (otherwise single image")
+	fs.StringVar(&o.tilePattern, "tile-pattern", "", "Path to tile pattern if using tiles, starting with !")
 
 	fs.BoolVar(&o.debug, "debug", false, "Log debug lines if set")
 	fs.BoolVar(&o.trace, "trace", false, "Log trace and debug lines if set")
@@ -225,5 +232,69 @@ func main() {
 		img = hackimage.Gray(i)
 	}
 
+	if size := opt.tileSize; size > 0 {
+		tiles := hackimage.Tiles(img, size)
+		mapping := mapTiles(tiles, '0')
+		pattern, err := readPattern(opt.tilePattern)
+		if err != nil {
+			logrus.Fatalf("readPattern(%q): %v", opt.tilePattern, err)
+		}
+		img = renderPattern(mapping, size, pattern)
+	}
+	hackimage.Print(img)
 	hackupdater.Update(ctx, opt.creds, opt.confirm, convert(img), nil, opt.config, opt.group)
+
+}
+
+func mapTiles(tiles []image.Gray, ch rune) map[rune]image.Gray {
+	mapping := make(map[rune]image.Gray, len(tiles))
+	for _, t := range tiles {
+		mapping[ch] = t
+		ch++
+	}
+	return mapping
+}
+
+// http://www.asciitable.com/
+func readPattern(path string) ([][]rune, error) {
+	buf, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(buf)), "\n")
+	runes := make([][]rune, len(lines))
+	for row, col := range lines {
+		runes[row] = make([]rune, len(col))
+		for c, ch := range col {
+			runes[row][c] = ch
+		}
+	}
+	return runes, nil
+}
+
+func renderPattern(tileset map[rune]image.Gray, size int, rows [][]rune) image.Gray {
+	var width int
+	for _, col := range rows {
+		if n := len(col); n > width {
+			width = n
+		}
+	}
+
+	rect := image.Rect(0, 0, width*size, size*len(rows))
+	img := image.NewGray(rect)
+	for row, cols := range rows {
+		for col, cell := range cols {
+			tile, ok := tileset[cell]
+			if !ok {
+				panic(fmt.Sprintf("not found (%d,%d): %s", row, col, cell))
+			}
+
+			// https://blog.golang.org/image-draw
+			dp := image.Pt(col*size, row*size)
+			bounds := tile.Bounds()
+			r := bounds.Sub(bounds.Min).Add(dp)
+			draw.Draw(img, r, &tile, bounds.Min, draw.Src)
+		}
+	}
+	return *img
 }
