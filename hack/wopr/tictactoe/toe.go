@@ -2,6 +2,8 @@ package tictactoe
 
 import (
 	"fmt"
+	"image/color"
+	"image/draw"
 	"io"
 	"log"
 	"math/rand"
@@ -9,6 +11,8 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/hackupdater"
+	tgimg "github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/image"
 	"github.com/GoogleCloudPlatform/testgrid/pkg/updater"
 	"gopkg.in/yaml.v2"
 
@@ -17,7 +21,7 @@ import (
 )
 
 const (
-	INSTANCE   = "e-blackwelder"
+	INSTANCE   = "cjwagner"
 	BOARD_SIZE = 3
 
 	PARAM_INST = "g"
@@ -25,6 +29,13 @@ const (
 	PARAM_COL  = "c"
 
 	TG_INSTANCE_FMT = "https://testgrid.k8s.io/r/k8s-testgrid-hackathon/everyone#%s&width=20&sort-by-name=&embed="
+)
+
+var (
+	BOARD_COLOR = color.RGBA{0x66, 0x00, 0x99, 0xff} // purple
+	EMPTY_COLOR = color.RGBA{0, 0xcc, 0x33, 0xff}    // light green
+	X_COLOR     = color.RGBA{R: 0xFF, A: 0xFF}
+	O_COLOR     = color.RGBA{G: 0xFF, A: 0xFF}
 )
 
 type Value int
@@ -79,6 +90,8 @@ type Game struct {
 	Turn    Value
 	Winner  Value
 	Message string
+
+	*tgimg.Image
 }
 
 func newGame() *Game {
@@ -87,9 +100,20 @@ func newGame() *Game {
 		// These initialize to 0 (EMPTY)
 		b[i] = make([]Value, BOARD_SIZE)
 	}
+	img, coords := hackupdater.TictactoeBoard(BOARD_COLOR, EMPTY_COLOR)
+	// Populate empty grid with invisible sprites to detect clicks.
+	for i, coord := range coords {
+		log.Printf("%v", coord)
+		emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", "Click me!", strconv.Itoa(i))
+		emptySprite := hackupdater.ASCII(" ", true, emptyColor, emptyColor)
+		bounds := emptySprite.Bounds()
+		r := bounds.Sub(bounds.Min).Add(coord)
+		draw.Draw(img, r, emptySprite, coord, draw.Src)
+	}
 	return &Game{
 		Board: b,
 		Turn:  X,
+		Image: img,
 	}
 }
 
@@ -340,8 +364,7 @@ func (s *Server) debug(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeStateGCS(instance string) error {
 	game := s.instances[instance]
-	columns := game.outputGCS()
-	s.gcsWrite(instance, columns)
+	s.gcsWrite(instance, game.Image.Cols)
 	return nil
 }
 
