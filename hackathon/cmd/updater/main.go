@@ -52,6 +52,7 @@ type options struct {
 	buildTimeout     time.Duration
 	gridPrefix       string
 	pixelsPath       string
+	pureString       string
 	imagePath        string
 
 	tileSize    int
@@ -98,6 +99,7 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 	fs.StringVar(&o.gridPrefix, "grid-prefix", "grid", "Join this with the grid name to create the GCS suffix")
 
 	fs.StringVar(&o.pixelsPath, "pixels-path", "", "Path of pixels input")
+	fs.StringVar(&o.pureString, "pure-string", "", "Strings input")
 	fs.StringVar(&o.imagePath, "image-path", "", "Path of image input")
 	fs.IntVar(&o.tileSize, "tile-size", 0, "pixel length of each tile in image if set (otherwise single image")
 	fs.StringVar(&o.tilePattern, "tile-pattern", "", "Path to tile pattern if using tiles, starting with !")
@@ -114,6 +116,9 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 func gatherOptions() options {
 	return gatherFlagOptions(flag.CommandLine, os.Args[1:]...)
 }
+func rowName(row int) string {
+	return fmt.Sprintf("%04d", row)
+}
 
 func convert(img image.Gray) []updater.InflatedColumn {
 	rect := img.Bounds()
@@ -123,11 +128,12 @@ func convert(img image.Gray) []updater.InflatedColumn {
 		for row := rect.Min.Y; row < rect.Max.Y; row++ {
 			var cell updater.Cell
 			if img.GrayAt(col, row).Y > 0 {
-				cell.Result = test_status.TestStatus_TOOL_FAIL
+				cell.Result = test_status.TestStatus_FAIL
+				cell.Icon = " "
 			} else {
 				cell.Result = test_status.TestStatus_BUILD_PASSED
 			}
-			name := fmt.Sprintf("%04d", row)
+			name := rowName(row)
 			cells[name] = cell
 		}
 		out = append(out, updater.InflatedColumn{
@@ -220,6 +226,8 @@ func main() {
 			logrus.Fatalf("Failed to read pixels file %s: %v", opt.pixelsPath, err)
 		}
 		img = pixelImage(pixels)
+	} else if opt.pureString != "" {
+		img = pixelImage(hackupdater.ASCII(opt.pureString, false))
 	} else {
 		f, err := os.Open(opt.imagePath)
 		if err != nil {
@@ -244,7 +252,6 @@ func main() {
 	tgi := renderImage(&img)
 	hackimage.Print(tgi)
 	hackupdater.Update(ctx, opt.creds, opt.confirm, tgi.Cols, nil, opt.config, opt.group)
-
 }
 
 func mapTiles(tiles []image.Gray, ch rune) map[rune]image.Gray {
