@@ -39,9 +39,9 @@
 26
 27
 28 L cat tail top
-29
-30
-31
+29 M tall shroom
+30 N short shoorm
+31 O dandelion
 
 32 P
 33
@@ -49,8 +49,8 @@
 35
 36 T cat tail bot
 37 U grass
-38
-39
+38 V pebbles
+39 W side pebble clump
 
 40 X
 41
@@ -66,3 +66,8 @@
 50 b bottom beam
 51 c gravel
 52 d bubbles
+53 e
+54 f
+55 g
+
+56 h flow

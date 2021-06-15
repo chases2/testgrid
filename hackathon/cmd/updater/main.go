@@ -241,8 +241,9 @@ func main() {
 		}
 		img = renderPattern(mapping, size, pattern)
 	}
-	hackimage.Print(img)
-	hackupdater.Update(ctx, opt.creds, opt.confirm, convert(img), nil, opt.config, opt.group)
+	tgi := renderImage(&img)
+	hackimage.Print(tgi)
+	hackupdater.Update(ctx, opt.creds, opt.confirm, tgi.Cols, nil, opt.config, opt.group)
 
 }
 
@@ -270,6 +271,15 @@ func readPattern(path string) ([][]rune, error) {
 		}
 	}
 	return runes, nil
+}
+
+func renderImage(img image.Image) *hackimage.Image {
+	tgi := hackimage.New(img.Bounds())
+	dp := image.Pt(0, 0)
+	bounds := img.Bounds()
+	r := bounds.Sub(bounds.Min).Add(dp)
+	draw.Draw(tgi, r, img, bounds.Min, draw.Src)
+	return tgi
 }
 
 func renderPattern(tileset map[rune]image.Gray, size int, rows [][]rune) image.Gray {
