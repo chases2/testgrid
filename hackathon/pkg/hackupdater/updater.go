@@ -18,8 +18,12 @@ package hackupdater
 
 import (
 	"context"
+	"image"
+	"image/color"
 	"strings"
 	"time"
+
+	hackimage "github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/image"
 
 	"github.com/GoogleCloudPlatform/testgrid/pkg/updater"
 	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
@@ -262,36 +266,27 @@ var letterMap = map[string]string{
 .....`,
 }
 
-func ASCII(s string, large bool) [][]bool {
+func ASCII(s string, large bool, color color.Color) *hackimage.Image {
 	var out [][]bool
-	if len(s) > 1 {
-		out = make([][]bool, 5)
-		// combine
-		for _, c := range s {
-			for i, line := range ASCII(string(c), large) {
-				out[i] = append(out[i], line...)
-			}
-		}
+
+	var rep string
+	if large {
+		rep = largeLetterMap[s]
 	} else {
-		var rep string
-		if large {
-			rep = largeLetterMap[s]
-		} else {
-			rep = letterMap[s]
-		}
-		for _, line := range strings.Split(rep, "\n") {
-			var boolLine []bool
-			for _, c := range line {
-				var b bool
-				if string(c) == "." {
-					b = true
-				}
-				boolLine = append(boolLine, b)
-			}
-			out = append(out, boolLine)
-		}
+		rep = letterMap[s]
 	}
-	return out
+	for _, line := range strings.Split(rep, "\n") {
+		var boolLine []bool
+		for _, c := range line {
+			var b bool
+			if string(c) == "." {
+				b = true
+			}
+			boolLine = append(boolLine, b)
+		}
+		out = append(out, boolLine)
+	}
+	return pixelImage(out, color)
 }
 
 // TODO: move game board somewhere else
@@ -348,7 +343,7 @@ func addSpritesRow(orig [][]bool, insertionPoints []Coord, start int) ([][]bool,
 	return append(orig, new...), append(insertionPoints, newInsertionPoints...)
 }
 
-func TictactoeBoard() ([][]bool, []Coord) {
+func TictactoeBoard(color color.Color) (*hackimage.Image, []Coord) {
 	// Each sprite is 21 by 21, double layer gaming boards surrounding it, and single layer separater
 
 	var out [][]bool
@@ -362,5 +357,24 @@ func TictactoeBoard() ([][]bool, []Coord) {
 	out, insertionPoints = addSpritesRow(out, insertionPoints, borderThickness+(spriteWidth+separaterThickness)*2)
 	out = addEmptyRow(out, borderThickness)
 
-	return out, insertionPoints
+	return pixelImage(out, color), insertionPoints
+}
+
+func pixelImage(pixels [][]bool, color color.Color) *hackimage.Image {
+	var cols int
+	for _, row := range pixels {
+		if n := len(row); n > cols {
+			cols = n
+		}
+	}
+	rect := image.Rect(0, 0, cols, len(pixels))
+	img := hackimage.New(rect)
+	for row, cols := range pixels {
+		for col, white := range cols {
+			if white {
+				img.Set(col, row, color)
+			}
+		}
+	}
+	return img
 }

@@ -116,42 +116,6 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 func gatherOptions() options {
 	return gatherFlagOptions(flag.CommandLine, os.Args[1:]...)
 }
-
-func framing(orig []updater.InflatedColumn, start int) ([]updater.InflatedColumn, int) {
-	pipeCell := updater.Cell{Result: test_status.TestStatus_FLAKY, Icon: "|"}
-	dashCell := updater.Cell{Result: test_status.TestStatus_FLAKY, Icon: "-"}
-	outerCol := updater.InflatedColumn{Cells: make(map[string]updater.Cell)}
-	for i := 0; i < len(orig[0].Cells)+2; i++ {
-		outerCol.Cells[rowName(start+i)] = pipeCell
-	}
-
-	var out []updater.InflatedColumn
-	out = append(out, outerCol)
-	for _, origCol := range orig {
-		newCol := updater.InflatedColumn{Cells: make(map[string]updater.Cell)}
-		for i := len(orig[0].Cells) + 1; i > -1; i-- {
-			if i == len(orig[0].Cells)+1 || i == 0 {
-				newCol.Cells[rowName(start+i)] = dashCell
-			} else {
-				newCol.Cells[rowName(start+i)] = origCol.Cells[rowName(start+i-1)]
-			}
-		}
-		out = append(out, newCol)
-	}
-	out = append(out, outerCol)
-	return out, start + len(out[0].Cells) - 1
-}
-
-func combine(collections [][]updater.InflatedColumn) []updater.InflatedColumn {
-	var out []updater.InflatedColumn
-
-	for _, columns := range collections {
-		out = append(out, columns...)
-	}
-
-	return out
-}
-
 func rowName(row int) string {
 	return fmt.Sprintf("%04d", row)
 }
@@ -256,21 +220,14 @@ func main() {
 	}).Info("Configured concurrency")
 
 	var img image.Gray
-	var cols []updater.InflatedColumn
 	if opt.pixelsPath != "" {
 		pixels, err := readPixels(opt.pixelsPath)
 		if err != nil {
 			logrus.Fatalf("Failed to read pixels file %s: %v", opt.pixelsPath, err)
 		}
-		cols = convert(pixelImage(pixels))
+		img = pixelImage(pixels)
 	} else if opt.pureString != "" {
-		var allFramedCols [][]updater.InflatedColumn
-		for _, c := range opt.pureString {
-			origCols := convert(pixelImage(hackupdater.ASCII(string(c), true)))
-			framedCols, _ := framing(origCols, 0)
-			allFramedCols = append(allFramedCols, framedCols)
-		}
-		cols = combine(allFramedCols)
+		img = pixelImage(hackupdater.ASCII(opt.pureString, false))
 	} else {
 		f, err := os.Open(opt.imagePath)
 		if err != nil {
@@ -280,7 +237,7 @@ func main() {
 		if err != nil {
 			logrus.Fatalf("image.Decode(%q): %v", opt.imagePath, err)
 		}
-		cols = convert(hackimage.Gray(i))
+		img = hackimage.Gray(i)
 	}
 
 	if size := opt.tileSize; size > 0 {
@@ -291,11 +248,10 @@ func main() {
 			logrus.Fatalf("readPattern(%q): %v", opt.tilePattern, err)
 		}
 		img = renderPattern(mapping, size, pattern)
-		hackimage.Print(img)
-		cols = convert(img)
 	}
-
-	hackupdater.Update(ctx, opt.creds, opt.confirm, cols, nil, opt.config, opt.group)
+	tgi := renderImage(&img)
+	hackimage.Print(tgi)
+	hackupdater.Update(ctx, opt.creds, opt.confirm, tgi.Cols, nil, opt.config, opt.group)
 }
 
 func mapTiles(tiles []image.Gray, ch rune) map[rune]image.Gray {
@@ -322,6 +278,15 @@ func readPattern(path string) ([][]rune, error) {
 		}
 	}
 	return runes, nil
+}
+
+func renderImage(img image.Image) *hackimage.Image {
+	tgi := hackimage.New(img.Bounds())
+	dp := image.Pt(0, 0)
+	bounds := img.Bounds()
+	r := bounds.Sub(bounds.Min).Add(dp)
+	draw.Draw(tgi, r, img, bounds.Min, draw.Src)
+	return tgi
 }
 
 func renderPattern(tileset map[rune]image.Gray, size int, rows [][]rune) image.Gray {
