@@ -40,7 +40,7 @@ SHALL WE PLAY A GAME?
 func main() {
 	creds := ""
 	confirm := true
-	config, _ := gcs.NewPath("gs://k8s-testgrid-hackathon/config")
+	config, _ := gcs.NewPath("gs://k8s-testgrid-hackathon/config2")
 
 	gcsWrite := func(testGroup string, cols []updater.InflatedColumn) {
 		issues := map[string][]string{}
