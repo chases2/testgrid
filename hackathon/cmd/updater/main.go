@@ -30,6 +30,11 @@ import (
 	"strings"
 	"time"
 
+	// supported image formats
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+
 	"github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/hackupdater"
 	hackimage "github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/image"
 	"github.com/GoogleCloudPlatform/testgrid/pb/test_status"
