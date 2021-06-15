@@ -61,11 +61,11 @@ func TestIsWin(t *testing.T) {
 	}
 }
 
-func buildGame(board [][]Value) *game {
+func buildGame(board [][]Value) *Game {
 	g := newGame()
 	for row := 0; row < BOARD_SIZE; row++ {
 		for col := 0; col < BOARD_SIZE; col++ {
-			g.board[row][col] = board[row][col]
+			g.Board[row][col] = board[row][col]
 		}
 	}
 	return g

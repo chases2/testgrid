@@ -240,7 +240,8 @@ func (s *Server) tryMove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Redirect to TG (where request came from)
-	http.Redirect(w, r, fmt.Sprintf(TG_INSTANCE_FMT, instance), http.StatusFound)
+	// http.Redirect(w, r, fmt.Sprintf(TG_INSTANCE_FMT, instance), http.StatusFound)
+	http.Redirect(w, r, "http://localhost:8080/toe/debug", http.StatusFound)
 }
 
 func (s *Server) newGame(w http.ResponseWriter, r *http.Request) {

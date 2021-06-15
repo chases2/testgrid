@@ -24,7 +24,10 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 <body>
 SHALL WE PLAY A GAME?
 
-<a href="/toe/new">Tic-tac-toe</button>
+<a href="/toe/new">Tic-tac-toe</a>
+&nbsp;
+<!-- TODO: easter egg! -->
+<!-- a href="/global-thermonuclear-war">Global Thermo-nuclear War</a -->
 </body>
 </html>
 `)
@@ -33,6 +36,9 @@ SHALL WE PLAY A GAME?
 func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/toe/", http.StripPrefix("/toe", tictactoe.CreateMux()))
+	mux.HandleFunc("/global-thermonuclear-war", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "the only winning move is not to play")
+	})
 	mux.HandleFunc("/", indexHandler)
 
 	fmt.Printf("Listening on :%d\n", PORT)
