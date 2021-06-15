@@ -21,14 +21,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"image"
+	"image/color"
 	"io/ioutil"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/hackupdater"
+	hackimage "github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/image"
 	"github.com/GoogleCloudPlatform/testgrid/pb/test_status"
 	"github.com/GoogleCloudPlatform/testgrid/pkg/updater"
 	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
@@ -49,6 +51,7 @@ type options struct {
 	buildTimeout     time.Duration
 	gridPrefix       string
 	pixelsPath       string
+	imagePath        string
 
 	debug    bool
 	trace    bool
@@ -90,6 +93,7 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 	fs.DurationVar(&o.buildTimeout, "build-timeout", 3*time.Minute, "Maximum time to wait to read each build")
 	fs.StringVar(&o.gridPrefix, "grid-prefix", "grid", "Join this with the grid name to create the GCS suffix")
 	fs.StringVar(&o.pixelsPath, "pixels-path", "", "Path of pixels input")
+	fs.StringVar(&o.imagePath, "image-path", "", "Path of image input")
 
 	fs.BoolVar(&o.debug, "debug", false, "Log debug lines if set")
 	fs.BoolVar(&o.trace, "trace", false, "Log trace and debug lines if set")
@@ -104,27 +108,26 @@ func gatherOptions() options {
 	return gatherFlagOptions(flag.CommandLine, os.Args[1:]...)
 }
 
-func convert(pixels [][]bool) []updater.InflatedColumn {
-	var outputColumns []updater.InflatedColumn
-	for iRow, row := range pixels {
-		for iCol, pixel := range row {
-			result := test_status.TestStatus_TOOL_FAIL // Black
-			if pixel {
-				result = test_status.TestStatus_BUILD_PASSED // Green
+func convert(img image.Gray) []updater.InflatedColumn {
+	rect := img.Bounds()
+	var out []updater.InflatedColumn
+	for col := rect.Min.X; col < rect.Max.X; col++ {
+		cells := map[string]updater.Cell{}
+		for row := rect.Min.Y; row < rect.Max.Y; row++ {
+			var cell updater.Cell
+			if img.GrayAt(col, row).Y > 0 {
+				cell.Result = test_status.TestStatus_TOOL_FAIL
+			} else {
+				cell.Result = test_status.TestStatus_BUILD_PASSED
 			}
-			cell := updater.Cell{
-				Result: result,
-			}
-			if iCol >= len(outputColumns) {
-				outputColumns = append(outputColumns, updater.InflatedColumn{})
-			}
-			if len(outputColumns[iCol].Cells) == 0 {
-				outputColumns[iCol].Cells = make(map[string]updater.Cell)
-			}
-			outputColumns[iCol].Cells[strconv.Itoa(iRow)] = cell
+			name := fmt.Sprintf("%04d", row)
+			cells[name] = cell
 		}
+		out = append(out, updater.InflatedColumn{
+			Cells: cells,
+		})
 	}
-	return outputColumns
+	return out
 }
 
 func readPixels(pixelsPath string) ([][]bool, error) {
@@ -148,6 +151,25 @@ func readPixels(pixelsPath string) ([][]bool, error) {
 		out = append(out, row)
 	}
 	return out, nil
+}
+
+func pixelImage(pixels [][]bool) image.Gray {
+	var cols int
+	for _, row := range pixels {
+		if n := len(row); n > cols {
+			cols = n
+		}
+	}
+	rect := image.Rect(0, 0, cols, len(pixels))
+	img := image.NewGray(rect)
+	for row, cols := range pixels {
+		for col, white := range cols {
+			if white {
+				img.SetGray(col, row, color.Gray{0xFF})
+			}
+		}
+	}
+	return *img
 }
 
 func main() {
@@ -184,9 +206,24 @@ func main() {
 		"build": opt.buildConcurrency,
 	}).Info("Configured concurrency")
 
-	pixels, err := readPixels(opt.pixelsPath)
-	if err != nil {
-		logrus.Fatalf("Failed to read pixels file %s: %v", opt.pixelsPath, err)
+	var img image.Gray
+	if opt.pixelsPath != "" {
+		pixels, err := readPixels(opt.pixelsPath)
+		if err != nil {
+			logrus.Fatalf("Failed to read pixels file %s: %v", opt.pixelsPath, err)
+		}
+		img = pixelImage(pixels)
+	} else {
+		f, err := os.Open(opt.imagePath)
+		if err != nil {
+			logrus.Fatalf("os.Open(%q): %v", opt.imagePath, err)
+		}
+		i, _, err := image.Decode(f)
+		if err != nil {
+			logrus.Fatalf("image.Decode(%q): %v", opt.imagePath, err)
+		}
+		img = hackimage.Gray(i)
 	}
-	hackupdater.Update(ctx, opt.creds, opt.confirm, convert(pixels), nil, opt.config, opt.group)
+
+	hackupdater.Update(ctx, opt.creds, opt.confirm, convert(img), nil, opt.config, opt.group)
 }
