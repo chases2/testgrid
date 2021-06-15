@@ -133,7 +133,7 @@ const Max = 10000
 var rowNames = func() []string {
 	names := make([]string, 0, Max)
 	for y := 0; y < Max; y++ {
-		names = append(names, fmt.Sprintf("04d", y))
+		names = append(names, fmt.Sprintf("%04d", y))
 	}
 	return names
 }()
@@ -149,8 +149,11 @@ func New(r image.Rectangle) *Image {
 
 	for x := 0; x < dx; x++ {
 		ic := updater.InflatedColumn{
-			Column: &statepb.Column{},
-			Cells:  make(map[string]updater.Cell, dy),
+			Column: &statepb.Column{
+				Build: fmt.Sprintf("%04d", x),
+				Name:  fmt.Sprintf("%04d", x),
+			},
+			Cells: make(map[string]updater.Cell, dy),
 		}
 
 		for y := 0; y < dy; y++ {
