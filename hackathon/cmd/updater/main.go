@@ -219,6 +219,7 @@ func main() {
 		"build": opt.buildConcurrency,
 	}).Info("Configured concurrency")
 
+	var out image.Image
 	var img image.Gray
 	if opt.pixelsPath != "" {
 		pixels, err := readPixels(opt.pixelsPath)
@@ -226,8 +227,9 @@ func main() {
 			logrus.Fatalf("Failed to read pixels file %s: %v", opt.pixelsPath, err)
 		}
 		img = pixelImage(pixels)
+		out = &img
 	} else if opt.pureString != "" {
-		img = pixelImage(hackupdater.ASCII(opt.pureString, false))
+		panic("update") // img = pixelImage(hackupdater.ASCII(opt.pureString, false))
 	} else {
 		f, err := os.Open(opt.imagePath)
 		if err != nil {
@@ -237,6 +239,7 @@ func main() {
 		if err != nil {
 			logrus.Fatalf("image.Decode(%q): %v", opt.imagePath, err)
 		}
+		out = i
 		img = hackimage.Gray(i)
 	}
 
@@ -248,8 +251,9 @@ func main() {
 			logrus.Fatalf("readPattern(%q): %v", opt.tilePattern, err)
 		}
 		img = renderPattern(mapping, size, pattern)
+		out = &img
 	}
-	tgi := renderImage(&img)
+	tgi := renderImage(out)
 	hackimage.Print(tgi)
 	hackupdater.Update(ctx, opt.creds, opt.confirm, tgi.Cols, nil, opt.config, opt.group)
 }
