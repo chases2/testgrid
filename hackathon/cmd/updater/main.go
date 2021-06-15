@@ -116,7 +116,16 @@ func convert(img image.Gray) []updater.InflatedColumn {
 		for row := rect.Min.Y; row < rect.Max.Y; row++ {
 			var cell updater.Cell
 			if img.GrayAt(col, row).Y > 0 {
-				cell.Result = test_status.TestStatus_TOOL_FAIL
+				cell.Result = test_status.TestStatus_PASS
+				switch row % 3 {
+				case 0:
+					cell.Icon = "."
+				case 1:
+					cell.Icon = "*"
+				case 2:
+					cell.Icon = "*"
+					cell.Result = test_status.TestStatus_FAIL
+				}
 			} else {
 				cell.Result = test_status.TestStatus_BUILD_PASSED
 			}
