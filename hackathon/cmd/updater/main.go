@@ -21,14 +21,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"image"
+	"image/color"
 	"io/ioutil"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/hackupdater"
+	hackimage "github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/image"
 	"github.com/GoogleCloudPlatform/testgrid/pb/test_status"
 	"github.com/GoogleCloudPlatform/testgrid/pkg/updater"
 	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
@@ -50,6 +52,7 @@ type options struct {
 	gridPrefix       string
 	pixelsPath       string
 	pureString       string
+	imagePath        string
 
 	debug    bool
 	trace    bool
@@ -92,6 +95,7 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 	fs.StringVar(&o.gridPrefix, "grid-prefix", "grid", "Join this with the grid name to create the GCS suffix")
 	fs.StringVar(&o.pixelsPath, "pixels-path", "", "Path of pixels input")
 	fs.StringVar(&o.pureString, "pure-string", "", "Strings input")
+	fs.StringVar(&o.imagePath, "image-path", "", "Path of image input")
 
 	fs.BoolVar(&o.debug, "debug", false, "Log debug lines if set")
 	fs.BoolVar(&o.trace, "trace", false, "Log trace and debug lines if set")
@@ -106,27 +110,66 @@ func gatherOptions() options {
 	return gatherFlagOptions(flag.CommandLine, os.Args[1:]...)
 }
 
-func convert(pixels [][]bool) []updater.InflatedColumn {
-	var outputColumns []updater.InflatedColumn
-	for iRow, row := range pixels {
-		for iCol, pixel := range row {
-			result := test_status.TestStatus_TOOL_FAIL // Black
-			if pixel {
-				result = test_status.TestStatus_BUILD_PASSED // Green
-			}
-			cell := updater.Cell{
-				Result: result,
-			}
-			if iCol >= len(outputColumns) {
-				outputColumns = append(outputColumns, updater.InflatedColumn{})
-			}
-			if len(outputColumns[iCol].Cells) == 0 {
-				outputColumns[iCol].Cells = make(map[string]updater.Cell)
-			}
-			outputColumns[iCol].Cells[strconv.Itoa(iRow)] = cell
-		}
+func framing(orig []updater.InflatedColumn, start int) ([]updater.InflatedColumn, int) {
+	pipeCell := updater.Cell{Result: test_status.TestStatus_FLAKY, Icon: "|"}
+	dashCell := updater.Cell{Result: test_status.TestStatus_FLAKY, Icon: "-"}
+	outerCol := updater.InflatedColumn{Cells: make(map[string]updater.Cell)}
+	for i := 0; i < len(orig[0].Cells)+2; i++ {
+		outerCol.Cells[rowName(start+i)] = pipeCell
 	}
-	return outputColumns
+
+	var out []updater.InflatedColumn
+	out = append(out, outerCol)
+	for _, origCol := range orig {
+		newCol := updater.InflatedColumn{Cells: make(map[string]updater.Cell)}
+		for i := len(orig[0].Cells) + 1; i > -1; i-- {
+			if i == len(orig[0].Cells)+1 || i == 0 {
+				newCol.Cells[rowName(start+i)] = dashCell
+			} else {
+				newCol.Cells[rowName(start+i)] = origCol.Cells[rowName(start+i-1)]
+			}
+		}
+		out = append(out, newCol)
+	}
+	out = append(out, outerCol)
+	return out, start + len(out[0].Cells) - 1
+}
+
+func combine(collections [][]updater.InflatedColumn) []updater.InflatedColumn {
+	var out []updater.InflatedColumn
+
+	for _, columns := range collections {
+		out = append(out, columns...)
+	}
+
+	return out
+}
+
+func rowName(row int) string {
+	return fmt.Sprintf("%04d", row)
+}
+
+func convert(img image.Gray) []updater.InflatedColumn {
+	rect := img.Bounds()
+	var out []updater.InflatedColumn
+	for col := rect.Min.X; col < rect.Max.X; col++ {
+		cells := map[string]updater.Cell{}
+		for row := rect.Min.Y; row < rect.Max.Y; row++ {
+			var cell updater.Cell
+			if img.GrayAt(col, row).Y > 0 {
+				cell.Result = test_status.TestStatus_FAIL
+				cell.Icon = " "
+			} else {
+				cell.Result = test_status.TestStatus_BUILD_PASSED
+			}
+			name := rowName(row)
+			cells[name] = cell
+		}
+		out = append(out, updater.InflatedColumn{
+			Cells: cells,
+		})
+	}
+	return out
 }
 
 func readPixels(pixelsPath string) ([][]bool, error) {
@@ -150,6 +193,25 @@ func readPixels(pixelsPath string) ([][]bool, error) {
 		out = append(out, row)
 	}
 	return out, nil
+}
+
+func pixelImage(pixels [][]bool) image.Gray {
+	var cols int
+	for _, row := range pixels {
+		if n := len(row); n > cols {
+			cols = n
+		}
+	}
+	rect := image.Rect(0, 0, cols, len(pixels))
+	img := image.NewGray(rect)
+	for row, cols := range pixels {
+		for col, white := range cols {
+			if white {
+				img.SetGray(col, row, color.Gray{0xFF})
+			}
+		}
+	}
+	return *img
 }
 
 func main() {
@@ -187,14 +249,34 @@ func main() {
 	}).Info("Configured concurrency")
 
 	var cols []updater.InflatedColumn
-	if len(opt.pixelsPath) > 0 {
+	if opt.pixelsPath != "" {
 		pixels, err := readPixels(opt.pixelsPath)
 		if err != nil {
 			logrus.Fatalf("Failed to read pixels file %s: %v", opt.pixelsPath, err)
 		}
-		cols = convert(pixels)
-	} else if len(opt.pureString) > 0 {
-		cols = convert(hackupdater.ASCII(opt.pureString))
+		cols = convert(pixelImage(pixels))
+	} else if opt.pureString != "" {
+		var allFramedCols [][]updater.InflatedColumn
+		for _, c := range opt.pureString {
+			origCols := convert(pixelImage(hackupdater.ASCII(string(c), true)))
+			framedCols, _ := framing(origCols, 0)
+			allFramedCols = append(allFramedCols, framedCols)
+		}
+		cols = combine(allFramedCols)
+	} else {
+		f, err := os.Open(opt.imagePath)
+		if err != nil {
+			logrus.Fatalf("os.Open(%q): %v", opt.imagePath, err)
+		}
+		i, _, err := image.Decode(f)
+		if err != nil {
+			logrus.Fatalf("image.Decode(%q): %v", opt.imagePath, err)
+		}
+		cols = convert(hackimage.Gray(i))
 	}
+
+	// pixels, _ := hackupdater.TictactoeBoard()
+	// cols = convert(pixelImage(pixels))
+
 	hackupdater.Update(ctx, opt.creds, opt.confirm, cols, nil, opt.config, opt.group)
 }

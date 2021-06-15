@@ -61,7 +61,74 @@ func Update(ctx context.Context, creds string, confirm bool, cols []updater.Infl
 	logrus.Infof("Update completed in %s", time.Since(start))
 }
 
-// TODO: more letters to be added
+// largeLetterMap contains 21X21 representation of X, O, and space
+var largeLetterMap = map[string]string{
+	"X": `.                   .
+ .                 . 
+  .               .  
+   .             .   
+    .           .    
+     .         .     
+      .       .      
+       .     .       
+        .   .        
+         . .         
+          .          
+         . .         
+        .   .        
+       .     .       
+      .       .      
+     .         .     
+    .           .    
+   .             .   
+  .               .  
+ .                 . 
+.                   .`,
+	"O": `     ...........     
+    .           .    
+   .             .   
+  .               .  
+ .                 . 
+.                   .
+.                   .
+.                   .
+.                   .
+.                   .
+.                   .
+.                   .
+.                   .
+.                   .
+.                   .
+.                   .
+ .                 . 
+  .               .  
+   .             .   
+    .           .    
+     ...........     `,
+	" ": `                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     
+                     `,
+}
+
+// lettermap contains 5X5 representation of each letter
 var letterMap = map[string]string{
 	"A": `  .  
  . . 
@@ -78,25 +145,146 @@ var letterMap = map[string]string{
 .    
 .   .
  ... `,
+	"D": `..   
+.  . 
+.   .
+.  . 
+..   `,
+	"E": `.....
+.    
+.....
+.    
+.....`,
+	"F": `.....
+.    
+.....
+.    
+.    `,
+	"G": ` ... 
+.   .
+.    
+.  ..
+ ... `,
+	"H": `.   .
+.   .
+.....
+.   .
+.   .`,
+	"I": ` ... 
+  .  
+  .  
+  .  
+ ... `,
+	"J": ` .. 
+  .  
+  .  
+. .  
+ .. `,
+	"K": ` .  .
+ . . 
+ .   
+ . . 
+ .  .`,
+	"L": ` .   
+ .   
+ .   
+ .   
+ ... `,
+	"M": `.   .
+.. ..
+. . .
+.   .
+.   .`,
+	"N": `.  . 
+.. . 
+. .. 
+. .. 
+.  . `,
+	"O": ` ... 
+.   .
+.   .
+.   .
+ ... `,
+	"P": ` ... 
+ .  .
+ ... 
+ .   
+ .   `,
+	"Q": ` ... 
+.   .
+.    
+ ... 
+    .`,
+	"R": ` ... 
+ .  .
+ ... 
+ . .
+ .  .`,
+	"S": ` ... 
+.    
+ ... 
+    .
+ ... `,
+	"T": ` ... 
+  .  
+  .  
+  .  
+  .  `,
+	"U": `.   .
+.   .
+.   .
+.   .
+ ... `,
+	"V": `.   .
+     
+ . . 
+     
+  .  `,
+	"W": `.   .
+. . .
+.. ..
+.. ..
+ . . `,
+	"X": `.   .
+ . . 
+  .  
+ . . 
+.   .`,
+	"Y": ` . . 
+  .  
+  .  
+  .  
+  .  `,
+	"Z": `.....
+   . 
+  .  
+ .   
+.....`,
 }
 
-func ASCII(s string) [][]bool {
+func ASCII(s string, large bool) [][]bool {
 	var out [][]bool
 	if len(s) > 1 {
 		out = make([][]bool, 5)
 		// combine
 		for _, c := range s {
-			for i, line := range ASCII(string(c)) {
+			for i, line := range ASCII(string(c), large) {
 				out[i] = append(out[i], line...)
 			}
 		}
 	} else {
-		for _, line := range strings.Split(string(letterMap[s]), "\n") {
+		var rep string
+		if large {
+			rep = largeLetterMap[s]
+		} else {
+			rep = letterMap[s]
+		}
+		for _, line := range strings.Split(rep, "\n") {
 			var boolLine []bool
 			for _, c := range line {
 				var b bool
-				if string(c) == " " {
-					b = true // TODO: not sure what to prefer
+				if string(c) == "." {
+					b = true
 				}
 				boolLine = append(boolLine, b)
 			}
@@ -104,4 +292,75 @@ func ASCII(s string) [][]bool {
 		}
 	}
 	return out
+}
+
+// TODO: move game board somewhere else
+const (
+	spriteWidth = 21
+
+	separaterThickness = 1
+	borderThickness    = 2
+)
+
+type Coord struct {
+	x, y int
+}
+
+func addEmptyRow(orig [][]bool, height int) [][]bool {
+	var new [][]bool
+	var row []bool
+	for i := 0; i < borderThickness*2+spriteWidth*3+separaterThickness*2; i++ {
+		row = append(row, true)
+	}
+	for i := 0; i < height; i++ {
+		new = append(new, row)
+	}
+	return append(orig, new...)
+}
+
+func addSpritesRow(orig [][]bool, insertionPoints []Coord, start int) ([][]bool, []Coord) {
+	var new [][]bool
+	var newInsertionPoints []Coord
+	for row := 0; row < spriteWidth; row++ {
+		var bools []bool
+		for i := 0; i < borderThickness; i++ {
+			bools = append(bools, true)
+		}
+		for iSprites := 0; iSprites < 3; iSprites++ {
+			newInsertionPoints = append(newInsertionPoints, Coord{
+				x: start,
+				y: borderThickness + iSprites*(spriteWidth+separaterThickness) - 1,
+			})
+			for col := 0; col < spriteWidth; col++ {
+				bools = append(bools, false)
+			}
+			if iSprites != 2 {
+				for iSeparator := 0; iSeparator < separaterThickness; iSeparator++ {
+					bools = append(bools, true)
+				}
+			}
+		}
+		for i := 0; i < borderThickness; i++ {
+			bools = append(bools, true)
+		}
+		new = append(new, bools)
+	}
+	return append(orig, new...), append(insertionPoints, newInsertionPoints...)
+}
+
+func TictactoeBoard() ([][]bool, []Coord) {
+	// Each sprite is 21 by 21, double layer gaming boards surrounding it, and single layer separater
+
+	var out [][]bool
+	var insertionPoints []Coord
+	// Add top rows
+	out = addEmptyRow(out, borderThickness)
+	out, insertionPoints = addSpritesRow(out, insertionPoints, borderThickness)
+	out = addEmptyRow(out, separaterThickness)
+	out, insertionPoints = addSpritesRow(out, insertionPoints, borderThickness+(spriteWidth+separaterThickness))
+	out = addEmptyRow(out, separaterThickness)
+	out, insertionPoints = addSpritesRow(out, insertionPoints, borderThickness+(spriteWidth+separaterThickness)*2)
+	out = addEmptyRow(out, borderThickness)
+
+	return out, insertionPoints
 }
