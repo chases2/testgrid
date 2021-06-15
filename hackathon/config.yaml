@@ -38,11 +38,29 @@ dashboards:
     description: cjwagner
     test_group_name: cjwagner
     open_test_template: # The URL template to visit after clicking on a cell
-      url: "http://localhost:8080/toe/move/cjwagner/col-<changelist>/row-<display-name>/cell-<test-id>"
+      url: http://localhost:8080/toe/move
+      options:
+        - key: g
+          value: <environment>
+        - key: r
+          value: <test-name>
+        - key: c
+          value: <changelist>
+        - key: id
+          value: <test-id>
   - name: e-blackwelder
     description: e-blackwelder
     open_test_template: # The URL template to visit after clicking on a cell
-      url: http://localhost:8080/toe/move?g=<environment>&r=<test-name>&c=<changelist>&=id=<test-id>
+      url: http://localhost:8080/toe/move
+      options:
+        - key: g
+          value: <environment>
+        - key: r
+          value: <test-name>
+        - key: c
+          value: <changelist>
+        - key: id
+          value: <test-id>
     test_group_name: e-blackwelder
   - name: fejta
     description: fejta

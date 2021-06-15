@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	INSTANCE   = "cjwagner"
+	INSTANCE   = "e-blackwelder"
 	BOARD_SIZE = 3
 
 	PARAM_INST = "g"
