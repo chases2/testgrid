@@ -9,9 +9,10 @@ func TestMakeMove(t *testing.T) {
 
 func TestIsWin(t *testing.T) {
 	cases := []struct {
-		name     string
-		input    [][]Value
-		expected Value
+		name           string
+		input          [][]Value
+		isOver         bool
+		expectedWinner Value
 	}{
 		{
 			name: "new board",
@@ -20,7 +21,8 @@ func TestIsWin(t *testing.T) {
 				{EMPTY, EMPTY, EMPTY},
 				{EMPTY, EMPTY, EMPTY},
 			},
-			expected: EMPTY,
+			isOver:         false,
+			expectedWinner: EMPTY,
 		},
 		{
 			name: "diagonal",
@@ -29,7 +31,8 @@ func TestIsWin(t *testing.T) {
 				{EMPTY, X, EMPTY},
 				{EMPTY, EMPTY, X},
 			},
-			expected: X,
+			isOver:         true,
+			expectedWinner: X,
 		},
 		{
 			name: "horizontal",
@@ -38,7 +41,8 @@ func TestIsWin(t *testing.T) {
 				{X, O, EMPTY},
 				{X, O, O},
 			},
-			expected: X,
+			isOver:         true,
+			expectedWinner: X,
 		},
 		{
 			name: "vertical",
@@ -47,15 +51,33 @@ func TestIsWin(t *testing.T) {
 				{EMPTY, O, EMPTY},
 				{EMPTY, EMPTY, O},
 			},
-			expected: X,
+			isOver:         true,
+			expectedWinner: X,
+		},
+		{
+			name: "cat",
+			input: [][]Value{
+				{X, O, X},
+				{O, O, X},
+				{X, X, O},
+			},
+			isOver:         true,
+			expectedWinner: EMPTY,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := buildGame(tc.input)
-			actual := g.isWin()
-			if actual != tc.expected {
-				t.Fatalf("Expecting winner: %d, got winner: %d", tc.expected, actual)
+			isOver, actual := g.gameOver()
+			if isOver != tc.isOver {
+				if isOver {
+					t.Fatalf("Not expecting a game over, got winner: %d", tc.expectedWinner)
+				} else {
+					t.Fatal("Expected game over, but wasn't")
+				}
+			}
+			if actual != tc.expectedWinner {
+				t.Fatalf("Expecting winner: %d, got winner: %d", tc.expectedWinner, actual)
 			}
 		})
 	}
