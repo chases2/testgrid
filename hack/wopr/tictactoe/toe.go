@@ -264,8 +264,11 @@ func (g *Game) otherPlayerMoves() {
 	g.Turn = ai.nextPlayer()
 }
 
+type WriteGCS func(testGroup string, cols []updater.InflatedColumn)
+
 type Server struct {
 	instances map[string]*Game
+	gcsWrite  WriteGCS
 	sync.Mutex
 }
 
@@ -336,14 +339,16 @@ func (s *Server) debug(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeStateGCS(instance string) error {
-	// output := s.instances[instance].outputGCS()
-	// TODO: handoff
+	game := s.instances[instance]
+	columns := game.outputGCS()
+	s.gcsWrite(instance, columns)
 	return nil
 }
 
-func CreateMux() http.Handler {
+func CreateMux(gcsWrite WriteGCS) http.Handler {
 	s := &Server{
 		instances: map[string]*Game{INSTANCE: newGame()},
+		gcsWrite:  gcsWrite,
 	}
 
 	mux := http.NewServeMux()
