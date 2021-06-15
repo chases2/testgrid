@@ -37,6 +37,8 @@ dashboards:
   - name: cjwagner
     description: cjwagner
     test_group_name: cjwagner
+    open_test_template: # The URL template to visit after clicking on a cell
+      url: "http://localhost:8080/toe/move/cjwagner/col-<changelist>/row-<display-name>/cell-<test-id>"
   - name: e-blackwelder
     description: e-blackwelder
     test_group_name: e-blackwelder
