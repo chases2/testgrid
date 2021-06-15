@@ -38,9 +38,9 @@ SHALL WE PLAY A GAME?
 }
 
 func main() {
-	creds := "TODO"
+	creds := ""
 	confirm := true
-	config, _ := gcs.NewPath("gs://k8s-testgrid-hackathon/data/e-blackwelder")
+	config, _ := gcs.NewPath("gs://k8s-testgrid-hackathon/config")
 
 	gcsWrite := func(testGroup string, cols []updater.InflatedColumn) {
 		issues := map[string][]string{}

@@ -62,7 +62,7 @@ func valueToResult(v Value) statuspb.TestStatus {
 	case O:
 		return statuspb.TestStatus_FAIL
 	}
-	return statuspb.TestStatus_NO_RESULT
+	return statuspb.TestStatus_UNKNOWN
 }
 
 func valueToMessage(v Value) string {
@@ -144,11 +144,11 @@ func (g *Game) outputGCS() []updater.InflatedColumn {
 		for row := 0; row < BOARD_SIZE; row++ {
 			val := g.Board[row][col]
 			id := fmt.Sprintf("%d,%d", row, col)
-			cells[strconv.Itoa(row)] = updater.Cell{
+			cells[fmt.Sprintf("%04d", row)] = updater.Cell{
 				Result:  valueToResult(val),
 				Icon:    valueToString(val),
 				CellID:  id,
-				ID:      id,
+				ID:      strconv.Itoa(row),
 				Message: valueToMessage(val),
 			}
 		}
