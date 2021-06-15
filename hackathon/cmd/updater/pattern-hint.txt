@@ -1,0 +1,68 @@
+
+
+
+
+
+
+
+
+
+0:  black
+1:  l - plat
+2:  c / plat
+3:  c = plat
+4:  nw double border
+5:  n double border
+6:  nw border
+7:  n border
+
+8:  triple
+9:  w laddter
+10 : solid
+11 ; bottom bubbles?
+12 < w double bord
+13 = grating
+14 > w border
+15 ? pole attach
+
+16 @
+17 A
+18
+19
+20
+21
+22
+23
+
+24 H
+25
+26
+27
+28 L cat tail top
+29
+30
+31
+
+32 P
+33
+34
+35
+36 T cat tail bot
+37 U grass
+38
+39
+
+40 X
+41
+42
+43 [
+44 \ water top
+45 ] grass top
+46 ^ rocks
+47 _ diff rocks
+
+48 ` brick
+49 a nailed beam
+50 b bottom beam
+51 c gravel
+52 d bubbles
