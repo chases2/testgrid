@@ -266,7 +266,7 @@ var letterMap = map[string]string{
 .....`,
 }
 
-func ASCII(s string, large bool, color color.Color) *hackimage.Image {
+func ASCII(s string, large bool, fgColor, bgColor color.Color) *hackimage.Image {
 	var out [][]bool
 
 	var rep string
@@ -286,7 +286,7 @@ func ASCII(s string, large bool, color color.Color) *hackimage.Image {
 		}
 		out = append(out, boolLine)
 	}
-	return pixelImage(out, color)
+	return pixelImage(out, fgColor, bgColor)
 }
 
 // TODO: move game board somewhere else
@@ -296,10 +296,6 @@ const (
 	separaterThickness = 1
 	borderThickness    = 2
 )
-
-type Coord struct {
-	x, y int
-}
 
 func addEmptyRow(orig [][]bool, height int) [][]bool {
 	var new [][]bool
@@ -313,19 +309,21 @@ func addEmptyRow(orig [][]bool, height int) [][]bool {
 	return append(orig, new...)
 }
 
-func addSpritesRow(orig [][]bool, insertionPoints []Coord, start int) ([][]bool, []Coord) {
+func addSpritesRow(orig [][]bool, insertionPoints []image.Point, start int) ([][]bool, []image.Point) {
 	var new [][]bool
-	var newInsertionPoints []Coord
+	var newInsertionPoints []image.Point
 	for row := 0; row < spriteWidth; row++ {
 		var bools []bool
 		for i := 0; i < borderThickness; i++ {
 			bools = append(bools, true)
 		}
 		for iSprites := 0; iSprites < 3; iSprites++ {
-			newInsertionPoints = append(newInsertionPoints, Coord{
-				x: start,
-				y: borderThickness + iSprites*(spriteWidth+separaterThickness) - 1,
-			})
+			if row == 0 {
+				newInsertionPoints = append(newInsertionPoints, image.Point{
+					X: start,
+					Y: borderThickness + iSprites*(spriteWidth+separaterThickness),
+				})
+			}
 			for col := 0; col < spriteWidth; col++ {
 				bools = append(bools, false)
 			}
@@ -343,11 +341,11 @@ func addSpritesRow(orig [][]bool, insertionPoints []Coord, start int) ([][]bool,
 	return append(orig, new...), append(insertionPoints, newInsertionPoints...)
 }
 
-func TictactoeBoard(color color.Color) (*hackimage.Image, []Coord) {
+func TictactoeBoard(fgColor, bgColor color.Color) (*hackimage.Image, []image.Point) {
 	// Each sprite is 21 by 21, double layer gaming boards surrounding it, and single layer separater
 
 	var out [][]bool
-	var insertionPoints []Coord
+	var insertionPoints []image.Point
 	// Add top rows
 	out = addEmptyRow(out, borderThickness)
 	out, insertionPoints = addSpritesRow(out, insertionPoints, borderThickness)
@@ -357,10 +355,10 @@ func TictactoeBoard(color color.Color) (*hackimage.Image, []Coord) {
 	out, insertionPoints = addSpritesRow(out, insertionPoints, borderThickness+(spriteWidth+separaterThickness)*2)
 	out = addEmptyRow(out, borderThickness)
 
-	return pixelImage(out, color), insertionPoints
+	return pixelImage(out, fgColor, bgColor), insertionPoints
 }
 
-func pixelImage(pixels [][]bool, color color.Color) *hackimage.Image {
+func pixelImage(pixels [][]bool, fgColor, bgColor color.Color) *hackimage.Image {
 	var cols int
 	for _, row := range pixels {
 		if n := len(row); n > cols {
@@ -372,7 +370,9 @@ func pixelImage(pixels [][]bool, color color.Color) *hackimage.Image {
 	for row, cols := range pixels {
 		for col, white := range cols {
 			if white {
-				img.Set(col, row, color)
+				img.Set(col, row, fgColor)
+			} else {
+				img.Set(col, row, bgColor)
 			}
 		}
 	}
