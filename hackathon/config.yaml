@@ -46,6 +46,8 @@ dashboards:
   - name: mpherman2
     description: mpherman2
     test_group_name: mpherman2
+    open_test_template: # The URL template to visit after clicking on a cell
+      url: http://k8s-testgrid.appspot.com/pants/col-<changelist>/row-<display-name>/cell-<test-id>
 
 default_test_group:
   days_of_results: 15 # Number of days of test results to gather and serve.
@@ -60,7 +62,7 @@ default_test_group:
 
 default_dashboard_tab:
   open_test_template: # The URL template to visit after clicking on a cell
-    url: https://prow.k8s.io/view/gs/<gcs_prefix>/<changelist>
+    url: https://oss-prow.k8s.io/view/gs/<gcs_prefix>/<changelist>
   file_bug_template: # The URL template to visit when filing a bug
     url: # empty
   attach_bug_template: # The URL template to visit when attaching to an existing bug
