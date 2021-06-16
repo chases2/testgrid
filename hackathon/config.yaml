@@ -29,6 +29,8 @@ test_groups:
   gcs_prefix: k8s-testgrid-hackathon/data/michelle192837
 - name: mpherman2
   gcs_prefix: k8s-testgrid-hackathon/data/mpherman2
+- name: minesweeper
+  gcs_prefix: k8s-testgrid-hackathon/data/minesweeper
 
 
 dashboards:
@@ -99,6 +101,12 @@ dashboards:
     test_group_name: michelle192837
     open_test_template: # The URL template to visit after clicking on a cell
       url: http://mine-dot-k8s-testgrid.appspot.com/minesweeper/<test-id>
+  - name: minesweeper
+    base_options: width=20&show-stale-tests=
+    description: minesweeper
+    test_group_name: minesweeper
+    open_test_template: # The URL template to visit after clicking on a cell
+      url: http://localhost:8080/minesweeper/<test-id>
 
 default_test_group:
   days_of_results: 15 # Number of days of test results to gather and serve.
