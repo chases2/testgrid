@@ -15,8 +15,12 @@ test_groups:
   gcs_prefix: k8s-testgrid-hackathon/data/chaodaiG
 - name: chases2
   gcs_prefix: k8s-testgrid-hackathon/data/chases2
+  column_header:
+  - configuration_value: "Game Message"
 - name: cjwagner
   gcs_prefix: k8s-testgrid-hackathon/data/cjwagner
+  column_header:
+  - configuration_value: "Game Message"
 - name: e-blackwelder
   gcs_prefix: k8s-testgrid-hackathon/data/e-blackwelder
 - name: fejta
@@ -36,6 +40,17 @@ dashboards:
   - name: chases2
     description: chases2
     test_group_name: chases2
+    open_test_template: # The URL template to visit after clicking on a cell
+      url: http://localhost:8080/toe/move
+      options:
+      - key: g
+        value: <environment>
+      - key: r
+        value: <test-name>
+      - key: c
+        value: <changelist>
+      - key: id
+        value: <test-id>
   - name: cjwagner
     description: cjwagner
     test_group_name: cjwagner
