@@ -410,10 +410,12 @@ func TictactoeSideBar(fgColor, bgColor color.Color) (*hackimage.Image, []image.P
 	insertionPoints = append(insertionPoints, image.Point{X: 1 + letterWidth + letterGap, Y: 1})
 	// Draw this then the closing line
 	for i := 0; i < rowAccum; i++ {
-		out = append(out, []bool{true})
-		out = append(out, streak(boxWidth-2, false))
-		out = append(out, []bool{true})
+		row := streak(boxWidth-2, false)
+		row = append([]bool{true}, row...)
+		row = append(row, true)
+		out = append(out, row)
 	}
+	out = append(out, streak(boxWidth, true))
 
 	return pixelImage(out, fgColor, bgColor), insertionPoints
 }

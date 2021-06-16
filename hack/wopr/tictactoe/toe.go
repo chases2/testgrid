@@ -126,29 +126,38 @@ func newGame() *Game {
 	g := &Game{
 		Board:    b,
 		Turn:     X,
-		Image:    img,
 		CoordMap: coordMap,
 	}
 	// Populate empty grid with invisible sprites to detect clicks.
 	for i := range coords {
 		emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", "Click me!", strconv.Itoa(i))
 		emptySprite := hackupdater.ASCII(" ", true, emptyColor, emptyColor)
-		g.drawSprite(coords[i], emptySprite)
+		g.drawSprite(img, coords[i], emptySprite)
 	}
 
 	// Create side bar
 	sidebar, coords := hackupdater.TictactoeSideBar(SIDEBAR_COLOR, color.White)
-	for i := range coords {
-
+	tgimg.Print(sidebar)
+	for i, word := range []string{"NEW", "GAME"} {
+		emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", "", strconv.Itoa(i))
+		wordColor := tgimg.MetaColor(SIDEBAR_COLOR, "", "New game", strconv.Itoa(i))
+		g.drawSprite(sidebar, coords[i], hackupdater.ASCIIWord(word, wordColor, emptyColor))
 	}
 
+	// Piece them together
+	width, height := img.Bounds().Dx(), img.Bounds().Dy()
+	width += sidebar.Bounds().Dx() + 100
+	g.Image = tgimg.New(image.Rect(0, 0, width, height))
+
+	g.drawSprite(g.Image, image.Point{X: 0, Y: 0}, img)
+	g.drawSprite(g.Image, image.Point{X: img.Bounds().Dx() + 1, Y: img.Bounds().Dy() + 1}, sidebar)
 	return g
 }
 
-func (g *Game) drawSprite(coord image.Point, sprite image.Image) {
+func (g *Game) drawSprite(img *tgimg.Image, coord image.Point, sprite image.Image) {
 	bounds := sprite.Bounds()
 	r := bounds.Sub(bounds.Min).Add(coord)
-	draw.Draw(g.Image, r, sprite, bounds.Min, draw.Src)
+	draw.Draw(img, r, sprite, bounds.Min, draw.Src)
 }
 
 func (g *Game) drawMessage() {
@@ -175,7 +184,7 @@ func (g *Game) tryMove(row, col int) error {
 	emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", valueToMessage(g.Turn), strconv.Itoa(i))
 	fgColor := tgimg.MetaColor(valueToColor(g.Turn), "", valueToMessage(g.Turn), strconv.Itoa(i))
 	sprite := hackupdater.ASCII(valueToString(g.Turn), true, fgColor, emptyColor)
-	g.drawSprite(i, sprite)
+	g.drawSprite(g.Image, g.CoordMap[i], sprite)
 	log.Printf("drawing %v", g.Turn)
 	// change players
 	if g.Turn == X {
