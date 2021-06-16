@@ -1,0 +1,7 @@
+service: wopr
+runtime: googlelegacy
+instance_class: F4_HIGHMEM
+
+handlers:
+- url: /.*
+  script: auto
