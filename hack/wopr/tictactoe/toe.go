@@ -31,6 +31,8 @@ const (
 	PARAM_CELLID = "id"
 
 	TG_INSTANCE_FMT = "https://testgrid.k8s.io/r/k8s-testgrid-hackathon/everyone#%s&width=20&sort-by-name=&embed="
+
+	AI_PLAYER Value = O
 )
 
 var (
@@ -138,6 +140,12 @@ func (g *Game) drawSprite(index int, sprite image.Image) {
 	draw.Draw(g.Image, r, sprite, bounds.Min, draw.Src)
 }
 
+func (g *Game) drawMessage() {
+	for _, col := range g.Image.Cols {
+		col.Column.Extra = []string{g.Message}
+	}
+}
+
 func (g *Game) tryMove(row, col int) error {
 	if g.Winner != EMPTY {
 		return fmt.Errorf("game over, %s won", valueToString(g.Winner))
@@ -170,7 +178,10 @@ func (g *Game) tryMove(row, col int) error {
 func (g *Game) checkGameOver() {
 	if isOver, winner := g.gameOver(); isOver {
 		g.Winner = winner
-		g.Message = fmt.Sprintf("GAME OVER: the winner is %s!", valueToString(winner))
+		if g.Message == "" {
+			g.Message = fmt.Sprintf("GAME OVER: the winner is %s!", valueToString(winner))
+			g.drawMessage()
+		}
 	}
 }
 
@@ -181,6 +192,7 @@ func (g *Game) makeMove(row, col int) {
 	} else {
 		g.Message = ""
 	}
+	g.drawMessage()
 }
 
 func (g *Game) outputGCS() []updater.InflatedColumn {
@@ -299,6 +311,10 @@ func (g *Game) findMoves() []move {
 
 func (g *Game) otherPlayerMoves() {
 	if isOver, _ := g.gameOver(); isOver {
+		return
+	}
+	if g.Turn != AI_PLAYER {
+		// Human player's move didn't change turn (invalid move).
 		return
 	}
 	moves := g.findMoves()
