@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/hackupdater"
 	hackimage "github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/image"
+	"github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/imagecompiler"
 	"github.com/GoogleCloudPlatform/testgrid/pb/test_status"
 	"github.com/GoogleCloudPlatform/testgrid/pkg/updater"
 	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
@@ -65,6 +66,9 @@ type options struct {
 	imageWidth  int
 	imageHeight int
 	dither      bool
+
+	imageTemplate string
+	imageFromYaml string
 
 	tileSize    int
 	tilePattern string
@@ -117,6 +121,9 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 	fs.IntVar(&o.tileSize, "tile-size", 0, "pixel length of each tile in image if set (otherwise single image")
 	fs.StringVar(&o.tilePattern, "tile-pattern", "", "Path to tile pattern if using tiles, starting with !")
 	fs.BoolVar(&o.dither, "dither", true, "Toggles whether to create dithered images")
+
+	fs.StringVar(&o.imageFromYaml, "image-from-yaml", "", "Name of yaml slice")
+	fs.StringVar(&o.imageTemplate, "image-from-yaml-template", "", "Name of template yaml slice")
 
 	fs.BoolVar(&o.debug, "debug", false, "Log debug lines if set")
 	fs.BoolVar(&o.trace, "trace", false, "Log trace and debug lines if set")
@@ -244,6 +251,11 @@ func main() {
 		out = &img
 	} else if opt.pureString != "" {
 		panic("update") // img = pixelImage(hackupdater.ASCII(opt.pureString, false))
+	} else if opt.imageFromYaml != "" {
+		out, err = imagecompiler.Image(opt.imageTemplate, opt.imageFromYaml, opt.dither)
+		if err != nil {
+			panic(err)
+		}
 	} else {
 		f, err := os.Open(opt.imagePath)
 		if err != nil {

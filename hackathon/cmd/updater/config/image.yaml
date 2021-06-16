@@ -1,0 +1,8 @@
+- name: scale
+  background: blank
+  insertions:
+  - path: /tmp/rose.jpeg
+  - path: /tmp/rose.jpeg
+  - path: /tmp/rose.jpeg
+  - path: /tmp/rose.jpeg
+  - path: /tmp/rose.jpeg
