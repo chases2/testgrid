@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/hackupdater"
 	hackimage "github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/image"
@@ -33,7 +34,7 @@ type options struct {
 	trace bool
 }
 
-const defaultURL = "https://hackathon-dot-k8s-testgrid.appspot.com/r/k8s-testgrid-hackathon/everyone#michelle192837&width=45&sort-by-name="
+const defaultURL = "https://hackathon-dot-k8s-testgrid.appspot.com/r/k8s-testgrid-hackathon/everyone#michelle192837&width=40&sort-by-name="
 
 // gatherOptions reads options from flags
 func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
@@ -267,9 +268,11 @@ const (
 	lose       = "Too bad, try again!"
 )
 
-func (b board) render(flagging bool) *hackimage.Image {
+func (b board) render(act *action) *hackimage.Image {
 	w, h := b.width(), b.height()
 	rect := image.Rect(0, 0, w, h)
+
+	flagging := act != nil && act.Flag
 
 	img := hackimage.New(rect)
 	over := b.over()
@@ -282,11 +285,9 @@ func (b board) render(flagging bool) *hackimage.Image {
 				Board: &b,
 				Open:  &image.Point{x, y},
 				Flag:  flagging,
+				Start: act.Start,
 			}
 			id := encode(&a)
-			if x == 0 && y == 0 {
-				fmt.Println("ERICK cell-id", id)
-			}
 			switch {
 			case cell.Flag:
 				if flagging {
@@ -319,11 +320,11 @@ func (b board) render(flagging bool) *hackimage.Image {
 				icon := " "
 				if m := mines(b.neighbors(x, y)); m > 0 {
 					icon = strconv.Itoa(m)
-					c = lightGreen
-				} else {
 					c = green
+				} else {
+					c = lightGreen
 				}
-				c = hackimage.MetaColor(lightGreen, icon, unmined, id)
+				c = hackimage.MetaColor(c, icon, unmined, id)
 			}
 			img.Set(x, y, c)
 		}
@@ -345,10 +346,11 @@ func toolbar(act *action) *hackimage.Image {
 	id := encode(&action{New: true})
 	mid := w / 2
 	newColor := blue
-	img.Set(mid, 0, hackimage.MetaColor(newColor, "N", "New game", id))
+	var seconds int64
 	if act != nil && act.Board != nil {
 		var remain int
 		var closed int
+		var boom bool
 		for _, cells := range *act.Board {
 			for _, cell := range cells {
 				if cell.Flag {
@@ -360,8 +362,23 @@ func toolbar(act *action) *hackimage.Image {
 				if !cell.Open && !cell.Mine {
 					closed++
 				}
+
+				if cell.Open && cell.Mine {
+					boom = true
+				}
 			}
 		}
+
+		var icon string
+		switch {
+		case boom:
+			icon = "😖"
+		case closed == 0:
+			icon = "😎"
+		default:
+			icon = "😐"
+		}
+		img.Set(mid, 0, hackimage.MetaColor(newColor, icon, "New game", id))
 
 		img.Set(0, 0, hackimage.MetaColor(black, fmt.Sprintf("%03d", remain), fmt.Sprintf("%03d mines remain", remain), noop))
 		var msg string
@@ -370,17 +387,26 @@ func toolbar(act *action) *hackimage.Image {
 		} else {
 			msg = "Flag cells with mines"
 		}
-		id := encode(&action{Board: act.Board, Flag: !act.Flag})
+		id := encode(&action{Board: act.Board, Flag: !act.Flag, Start: act.Start})
 		var c color.Color
 		if act.Flag {
 			c = red
 		} else {
 			c = gray
 		}
-		img.Set(mid+1, 0, hackimage.MetaColor(c, "F", msg, id))
+		img.Set(mid+1, 0, hackimage.MetaColor(c, "🚩", msg, id))
+		seconds = time.Now().Unix() - act.Start
+		if seconds > 999 {
+			logrus.WithField("seconds", seconds).Warning("Truncating time")
+			seconds = 999
+		}
+	} else {
+		img.Set(mid, 0, hackimage.MetaColor(newColor, "😐", "New game", id))
+		seconds = 0
 	}
 
-	img.Set(w-1, 0, hackimage.MetaColor(black, "123", "123 seconds elapsed", noop))
+	s := fmt.Sprintf("%03d", seconds)
+	img.Set(w-1, 0, hackimage.MetaColor(black, s, s+" seconds remaining", noop))
 	return img
 }
 
@@ -389,6 +415,7 @@ type action struct {
 	Flag  bool
 	New   bool
 	Open  *image.Point
+	Start int64
 }
 
 func decode(path string) (*action, error) {
@@ -430,23 +457,29 @@ func main() {
 		opt.group = g
 	}
 
+	seed := time.Now().Unix()
+	rand.Seed(seed)
+
+	logrus.WithFields(logrus.Fields{
+		"config":  opt.config,
+		"confirm": opt.confirm,
+		"group":   opt.group,
+		"seed":    seed,
+	}).Info("Configured")
+
 	logrus.SetReportCaller(true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	step := func(act *action) {
-		b := move(act)
-		img := b.render(act != nil && act.Flag)
+		act = move(act)
+		img := act.Board.render(act)
 		w, h := img.Bounds().Dx(), img.Bounds().Dy()
 		h++
 		if w < 6 {
 			w = 6
 		}
-		if act == nil {
-			act = &action{}
-		}
-		act.Board = b
 		tool := toolbar(act)
 		final := hackimage.New(image.Rect(0, 0, w, h))
 		bounds := final.Bounds()
@@ -479,13 +512,16 @@ func main() {
 	logrus.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func move(act *action) *board {
+func move(act *action) *action {
 	switch {
 	case act == nil || act.Board == nil || act.New:
 		b := generate(settings[0])
-		return &b
+		return &action{
+			Board: &b,
+			Start: time.Now().Unix(),
+		}
 	case act.Open == nil:
-		return act.Board
+		return act
 	default:
 		b := *act.Board
 		x, y := act.Open.X, act.Open.Y
@@ -500,9 +536,9 @@ func move(act *action) *board {
 			default:
 				cell.Flag = true
 			}
-		} else {
+		} else if !cell.Flag {
 			b.open(x, y)
 		}
-		return &b
+		return act
 	}
 }
