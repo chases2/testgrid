@@ -1,0 +1,12 @@
+- name: scale
+  template: blank
+  images:
+  - 
+    max_width: 10
+    max_height: 10
+  - max_width: 20
+    max_height: 20
+  - max_width: 40
+    max_height: 40
+  - max_width: 80
+    max_height: 80
