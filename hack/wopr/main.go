@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -38,9 +39,11 @@ SHALL WE PLAY A GAME?
 }
 
 func main() {
+	flag.Parse()
+
 	creds := ""
 	confirm := true
-	config, _ := gcs.NewPath("gs://k8s-testgrid-hackathon/config2")
+	config, _ := gcs.NewPath("gs://k8s-testgrid-hackathon/config")
 
 	gcsWrite := func(testGroup string, cols []updater.InflatedColumn) {
 		issues := map[string][]string{}

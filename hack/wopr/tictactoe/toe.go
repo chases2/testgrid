@@ -1,6 +1,7 @@
 package tictactoe
 
 import (
+	"flag"
 	"fmt"
 	"image"
 	"image/color"
@@ -22,7 +23,6 @@ import (
 )
 
 const (
-	INSTANCE   = "cjwagner"
 	BOARD_SIZE = 3
 
 	PARAM_INST   = "g"
@@ -34,6 +34,8 @@ const (
 
 	AI_PLAYER Value = O
 )
+
+var instance = flag.String("instance", "", "e.g. cjwagner or michelle192837")
 
 var (
 	BOARD_COLOR = color.RGBA{0x66, 0x00, 0x99, 0xff} // purple
@@ -387,17 +389,16 @@ func (s *Server) newGame(w http.ResponseWriter, r *http.Request) {
 	s.Lock()
 	defer s.Unlock()
 
-	instance := INSTANCE
-	s.instances[instance] = newGame()
-	log.Printf("Instance: %s", instance)
+	s.instances[*instance] = newGame()
+	log.Printf("Instance: %s", *instance)
 
-	if err := s.writeStateGCS(instance); err != nil {
+	if err := s.writeStateGCS(*instance); err != nil {
 		http.Error(w, "Error writing state to GCS.", http.StatusInternalServerError)
 		return
 	}
 
 	// Redirect to TG (where request came from)
-	url := fmt.Sprintf(TG_INSTANCE_FMT, instance)
+	url := fmt.Sprintf(TG_INSTANCE_FMT, *instance)
 	log.Printf("URL: %s", url)
 	http.Redirect(w, r, url, http.StatusFound)
 }
@@ -417,8 +418,11 @@ func (s *Server) writeStateGCS(instance string) error {
 }
 
 func CreateMux(gcsWrite WriteGCS) http.Handler {
+	if *instance == "" {
+		log.Fatal("The --instance flag is required.")
+	}
 	s := &Server{
-		instances: map[string]*Game{INSTANCE: newGame()},
+		instances: map[string]*Game{*instance: newGame()},
 		gcsWrite:  gcsWrite,
 	}
 
