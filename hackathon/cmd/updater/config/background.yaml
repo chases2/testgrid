@@ -1,0 +1,26 @@
+- name: blank
+  width: 250
+  height: 160
+  max_width: 0 # don't scale yet
+  max_height: 0 # don't scale yet
+  insertions:
+  - x: 0
+    y: 0
+    max_width: 10
+    max_height: 10
+  - x: 12
+    y: 0
+    max_width: 20
+    max_height: 20
+  - x: 34
+    y: 0
+    max_width: 40
+    max_height: 40
+  - x: 0
+    y: 42
+    max_width: 80
+    max_height: 80
+  - x: 82
+    y: 0
+    max_width: 160
+    max_height: 160
