@@ -35,9 +35,11 @@ dashboards:
 - name: everyone
   dashboard_tab:
   - name: chaodaiG
+    base_options: width=20&show-stale-tests=
     description: chaodaiG
     test_group_name: chaodaiG
   - name: chases2
+    base_options: width=20&show-stale-tests=
     description: chases2
     test_group_name: chases2
     open_test_template: # The URL template to visit after clicking on a cell
@@ -52,6 +54,7 @@ dashboards:
       - key: id
         value: <test-id>
   - name: cjwagner
+    base_options: width=20&show-stale-tests=
     description: cjwagner
     test_group_name: cjwagner
     open_test_template: # The URL template to visit after clicking on a cell
@@ -66,6 +69,7 @@ dashboards:
         - key: id
           value: <test-id>
   - name: e-blackwelder
+    base_options: width=20&show-stale-tests=
     description: e-blackwelder
     open_test_template: # The URL template to visit after clicking on a cell
       url: http://localhost:8080/toe/move
@@ -80,14 +84,17 @@ dashboards:
           value: <test-id>
     test_group_name: e-blackwelder
   - name: fejta
+    base_options: width=20&show-stale-tests=
     description: fejta
     test_group_name: fejta
   - name: mpherman2
+    base_options: width=20&show-stale-tests=
     description: mpherman2
     test_group_name: mpherman2
     open_test_template: # The URL template to visit after clicking on a cell
       url: http://k8s-testgrid.appspot.com/pants/col-<changelist>/row-<display-name>/cell-<test-id>
   - name: michelle192837
+    base_options: width=20&show-stale-tests=
     description: michelle192837
     test_group_name: michelle192837
     open_test_template: # The URL template to visit after clicking on a cell
@@ -109,8 +116,7 @@ default_test_group:
   use_kubernetes_client: true # These two fields are deprecated and should always be true
   is_external: true
   alert_stale_results_hours: 0 # Don't alert for staleness by default.
-  num_failures_to_alert: 3 # Consider a test failed if it has 3 or more consecutive failures.
-  num_passes_to_disable_alert: 1 # Consider a failing test passing if it has 1 or more consecutive passes.
+  num_failures_to_alert: 0 # Disable red rows.
   code_search_path: github.com/chaodaiG/testgrid/search # URL for regression search links.
 
 default_dashboard_tab:
