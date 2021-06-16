@@ -39,10 +39,11 @@ const (
 var instance = flag.String("instance", os.Getenv("INSTANCE"), "e.g. cjwagner or michelle192837")
 
 var (
-	BOARD_COLOR = color.RGBA{0x66, 0x00, 0x99, 0xff} // purple
-	EMPTY_COLOR = color.RGBA{0, 0xcc, 0x33, 0xff}    // light green
-	X_COLOR     = color.RGBA{R: 0xFF, A: 0xFF}
-	O_COLOR     = color.Black
+	BOARD_COLOR   = color.RGBA{0x66, 0x00, 0x99, 0xff} // purple
+	EMPTY_COLOR   = color.RGBA{0, 0xcc, 0x33, 0xff}    // light green
+	SIDEBAR_COLOR = color.RGBA{0xaa, 0xee, 0xbb, 0xff} // green
+	X_COLOR       = color.RGBA{R: 0xFF, A: 0xFF}
+	O_COLOR       = color.Black
 )
 
 type Value int
@@ -132,14 +133,21 @@ func newGame() *Game {
 	for i := range coords {
 		emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", "Click me!", strconv.Itoa(i))
 		emptySprite := hackupdater.ASCII(" ", true, emptyColor, emptyColor)
-		g.drawSprite(i, emptySprite)
+		g.drawSprite(coords[i], emptySprite)
 	}
+
+	// Create side bar
+	sidebar, coords := hackupdater.TictactoeSideBar(SIDEBAR_COLOR, color.White)
+	for i := range coords {
+
+	}
+
 	return g
 }
 
-func (g *Game) drawSprite(index int, sprite image.Image) {
+func (g *Game) drawSprite(coord image.Point, sprite image.Image) {
 	bounds := sprite.Bounds()
-	r := bounds.Sub(bounds.Min).Add(g.CoordMap[index])
+	r := bounds.Sub(bounds.Min).Add(coord)
 	draw.Draw(g.Image, r, sprite, bounds.Min, draw.Src)
 }
 
