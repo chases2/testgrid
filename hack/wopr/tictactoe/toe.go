@@ -2,6 +2,7 @@ package tictactoe
 
 import (
 	"fmt"
+	"image"
 	"image/color"
 	"image/draw"
 	"io"
@@ -21,12 +22,13 @@ import (
 )
 
 const (
-	INSTANCE   = "e-blackwelder"
+	INSTANCE   = "cjwagner"
 	BOARD_SIZE = 3
 
-	PARAM_INST = "g"
-	PARAM_ROW  = "r"
-	PARAM_COL  = "c"
+	PARAM_INST   = "g"
+	PARAM_ROW    = "r"
+	PARAM_COL    = "c"
+	PARAM_CELLID = "id"
 
 	TG_INSTANCE_FMT = "https://testgrid.k8s.io/r/k8s-testgrid-hackathon/everyone#%s&width=20&sort-by-name=&embed="
 )
@@ -35,7 +37,7 @@ var (
 	BOARD_COLOR = color.RGBA{0x66, 0x00, 0x99, 0xff} // purple
 	EMPTY_COLOR = color.RGBA{0, 0xcc, 0x33, 0xff}    // light green
 	X_COLOR     = color.RGBA{R: 0xFF, A: 0xFF}
-	O_COLOR     = color.RGBA{G: 0xFF, A: 0xFF}
+	O_COLOR     = color.Black
 )
 
 type Value int
@@ -65,6 +67,15 @@ func valueToString(v Value) string {
 	}
 	return " "
 }
+func valueToColor(v Value) color.Color {
+	switch v {
+	case X:
+		return X_COLOR
+	case O:
+		return O_COLOR
+	}
+	return EMPTY_COLOR
+}
 
 func valueToResult(v Value) statuspb.TestStatus {
 	switch v {
@@ -92,6 +103,7 @@ type Game struct {
 	Message string
 
 	*tgimg.Image
+	CoordMap map[int]image.Point // Map of board position to image coordinates
 }
 
 func newGame() *Game {
@@ -100,21 +112,30 @@ func newGame() *Game {
 		// These initialize to 0 (EMPTY)
 		b[i] = make([]Value, BOARD_SIZE)
 	}
-	img, coords := hackupdater.TictactoeBoard(BOARD_COLOR, EMPTY_COLOR)
-	// Populate empty grid with invisible sprites to detect clicks.
+	img, coords := hackupdater.TictactoeBoard(BOARD_COLOR, color.Black)
+	coordMap := make(map[int]image.Point, 9)
 	for i, coord := range coords {
-		log.Printf("%v", coord)
+		coordMap[i] = coord
+	}
+	g := &Game{
+		Board:    b,
+		Turn:     X,
+		Image:    img,
+		CoordMap: coordMap,
+	}
+	// Populate empty grid with invisible sprites to detect clicks.
+	for i := range coords {
 		emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", "Click me!", strconv.Itoa(i))
 		emptySprite := hackupdater.ASCII(" ", true, emptyColor, emptyColor)
-		bounds := emptySprite.Bounds()
-		r := bounds.Sub(bounds.Min).Add(coord)
-		draw.Draw(img, r, emptySprite, coord, draw.Src)
+		g.drawSprite(i, emptySprite)
 	}
-	return &Game{
-		Board: b,
-		Turn:  X,
-		Image: img,
-	}
+	return g
+}
+
+func (g *Game) drawSprite(index int, sprite image.Image) {
+	bounds := sprite.Bounds()
+	r := bounds.Sub(bounds.Min).Add(g.CoordMap[index])
+	draw.Draw(g.Image, r, sprite, bounds.Min, draw.Src)
 }
 
 func (g *Game) tryMove(row, col int) error {
@@ -131,6 +152,12 @@ func (g *Game) tryMove(row, col int) error {
 		return fmt.Errorf("move already taken: %d, %d", row, col)
 	}
 	g.Board[row][col] = g.Turn
+	i := row + col*3
+	emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", valueToMessage(g.Turn), strconv.Itoa(i))
+	fgColor := tgimg.MetaColor(valueToColor(g.Turn), "", valueToMessage(g.Turn), strconv.Itoa(i))
+	sprite := hackupdater.ASCII(valueToString(g.Turn), true, fgColor, emptyColor)
+	g.drawSprite(i, sprite)
+	log.Printf("drawing %v", g.Turn)
 	// change players
 	if g.Turn == X {
 		g.Turn = O
@@ -283,9 +310,7 @@ func (g *Game) otherPlayerMoves() {
 
 	// Make move
 	randomMove := moves[0]
-	ai := g.Turn
-	g.Board[randomMove.row][randomMove.col] = ai
-	g.Turn = ai.nextPlayer()
+	g.makeMove(randomMove.row, randomMove.col)
 }
 
 type WriteGCS func(testGroup string, cols []updater.InflatedColumn)
@@ -300,15 +325,22 @@ func (s *Server) tryMove(w http.ResponseWriter, r *http.Request) {
 	// parameters: instance, row, col
 	params := r.URL.Query()
 	instance := params.Get(PARAM_INST)
-	row, err := strconv.Atoi(params.Get(PARAM_ROW))
-	if err != nil {
-		http.Error(w, "Unknown or unparsable row.", http.StatusBadRequest)
-		return
-	}
-	col, err := strconv.Atoi(params.Get(PARAM_COL))
-	if err != nil {
-		http.Error(w, "Unknown or unparsable col.", http.StatusBadRequest)
-		return
+	var row, col, cell int
+	var err error
+	if cell, err = strconv.Atoi(params.Get(PARAM_CELLID)); err == nil {
+		row = cell % 3
+		col = cell / 3
+	} else {
+		row, err = strconv.Atoi(params.Get(PARAM_ROW))
+		if err != nil {
+			http.Error(w, "Unknown or unparsable row.", http.StatusBadRequest)
+			return
+		}
+		col, err = strconv.Atoi(params.Get(PARAM_COL))
+		if err != nil {
+			http.Error(w, "Unknown or unparsable col.", http.StatusBadRequest)
+			return
+		}
 	}
 
 	s.Lock()
