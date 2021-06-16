@@ -303,15 +303,14 @@ func ASCIIWord(s string, fgColor, bgColor color.Color) *hackimage.Image {
 			out = si
 		} else {
 			for iRow, row := range si {
-				if iRow > 0 {
-					for i := 0; i < letterWidth; i++ {
-						out[iRow] = append(out[iRow], false)
-					}
+				for i := 0; i < letterGap; i++ {
+					out[iRow] = append(out[iRow], false)
 				}
 				out[iRow] = append(out[iRow], row...)
 			}
 		}
 	}
+
 	return pixelImage(out, fgColor, bgColor)
 }
 
@@ -407,7 +406,7 @@ func TictactoeSideBar(fgColor, bgColor color.Color) (*hackimage.Image, []image.P
 	insertionPoints = append(insertionPoints, image.Point{X: 1 + letterWidth + letterGap, Y: 1})
 	// GAME
 	rowAccum += letterWidth + letterGap
-	insertionPoints = append(insertionPoints, image.Point{X: 1 + letterWidth + letterGap, Y: 1})
+	insertionPoints = append(insertionPoints, image.Point{X: 1 + (letterWidth+letterGap)/2, Y: letterWidth + letterGap})
 	// Draw this then the closing line
 	for i := 0; i < rowAccum; i++ {
 		row := streak(boxWidth-2, false)

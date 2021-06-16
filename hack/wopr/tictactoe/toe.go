@@ -33,6 +33,8 @@ const (
 
 	TG_INSTANCE_FMT = "https://testgrid.k8s.io/r/k8s-testgrid-hackathon/everyone#%s&width=20&sort-by-name=&embed="
 
+	NEW_GAME_BUTTON_ID = 101
+
 	AI_PLAYER Value = O
 )
 
@@ -136,11 +138,11 @@ func newGame() *Game {
 	}
 
 	// Create side bar
-	sidebar, coords := hackupdater.TictactoeSideBar(SIDEBAR_COLOR, color.White)
-	tgimg.Print(sidebar)
+	sidebar, coords := hackupdater.TictactoeSideBar(BOARD_COLOR, EMPTY_COLOR)
 	for i, word := range []string{"NEW", "GAME"} {
-		emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", "", strconv.Itoa(i))
-		wordColor := tgimg.MetaColor(SIDEBAR_COLOR, "", "New game", strconv.Itoa(i))
+		emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", "", strconv.Itoa(NEW_GAME_BUTTON_ID))
+		wordColor := tgimg.MetaColor(BOARD_COLOR, "", "New game", strconv.Itoa(NEW_GAME_BUTTON_ID))
+		tgimg.Print(hackupdater.ASCIIWord(word, wordColor, emptyColor))
 		g.drawSprite(sidebar, coords[i], hackupdater.ASCIIWord(word, wordColor, emptyColor))
 	}
 
@@ -150,7 +152,7 @@ func newGame() *Game {
 	g.Image = tgimg.New(image.Rect(0, 0, width, height))
 
 	g.drawSprite(g.Image, image.Point{X: 0, Y: 0}, img)
-	g.drawSprite(g.Image, image.Point{X: img.Bounds().Dx() + 1, Y: img.Bounds().Dy() + 1}, sidebar)
+	g.drawSprite(g.Image, image.Point{X: img.Bounds().Dx() + 1, Y: 1}, sidebar)
 	return g
 }
 
@@ -364,6 +366,10 @@ func (s *Server) tryMove(w http.ResponseWriter, r *http.Request) {
 	var row, col, cell int
 	var err error
 	if cell, err = strconv.Atoi(params.Get(PARAM_CELLID)); err == nil {
+		if cell == NEW_GAME_BUTTON_ID {
+			s.newGame(w, r)
+			return
+		}
 		row = cell % 3
 		col = cell / 3
 	} else {
