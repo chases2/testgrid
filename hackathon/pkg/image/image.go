@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	_ "image/png"
+	"image/draw"
 
 	statepb "github.com/GoogleCloudPlatform/testgrid/pb/state"
 	tspb "github.com/GoogleCloudPlatform/testgrid/pb/test_status"
@@ -42,22 +42,26 @@ func Gray(img image.Image) image.Gray {
 	return *gray
 }
 
-// Print a gray image to stdout.
-// Black: " ", White: "."
-func Print(img image.Image) {
-	bounds := img.Bounds()
-	model := color.GrayModel
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+// Print image to stdout
+func Print(im image.Image) {
 
-			c := model.Convert(img.At(x, y)).(color.Gray)
-			if k := c.Y; k > 0 {
-				fmt.Print(".")
-			} else {
-				fmt.Print(" ")
-			}
+	pi := image.NewPaletted(im.Bounds(), []color.Color{
+		color.Gray{Y: 255},
+		color.Gray{Y: 160},
+		color.Gray{Y: 70},
+		color.Gray{Y: 35},
+		color.Gray{Y: 0},
+	})
+
+	width := im.Bounds().Dx()
+
+	draw.FloydSteinberg.Draw(pi, im.Bounds(), im, image.ZP)
+	shade := []string{" ", "░", "▒", "▓", "█"}
+	for i, p := range pi.Pix {
+		fmt.Print(shade[p])
+		if (i+1)%width == 0 {
+			fmt.Print("\n")
 		}
-		fmt.Println()
 	}
 }
 
