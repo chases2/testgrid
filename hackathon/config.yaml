@@ -98,16 +98,7 @@ dashboards:
     description: michelle192837
     test_group_name: michelle192837
     open_test_template: # The URL template to visit after clicking on a cell
-      url: http://localhost:8080/minesweeper/<test-id>
-      options:
-        - key: g
-          value: <environment>
-        - key: r
-          value: <test-name>
-        - key: c
-          value: <changelist>
-        - key: id
-          value: <test-id>
+      url: http://mine-dot-k8s-testgrid.appspot.com/minesweeper/<test-id>
 
 default_test_group:
   days_of_results: 15 # Number of days of test results to gather and serve.
