@@ -95,13 +95,13 @@ var colorMap = map[tspb.TestStatus]color.Color{
 	tspb.TestStatus_PASS:              color.RGBA{0, 0xcc, 0x33, 0xff},
 	tspb.TestStatus_PASS_WITH_ERRORS:  color.RGBA{0, 0xcc, 0x33, 0xff},
 	tspb.TestStatus_PASS_WITH_SKIPS:   color.RGBA{0, 0xcc, 0x33, 0xff},
-	tspb.TestStatus_RUNNING:           color.RGBA{0xbb, 0xbb, 0xbb, 0xff},
-	tspb.TestStatus_CATEGORIZED_ABORT: color.RGBA{0xbb, 0xbb, 0xbb, 0xff},
-	tspb.TestStatus_UNKNOWN:           color.RGBA{0xbb, 0xbb, 0xbb, 0xff},
-	tspb.TestStatus_CANCEL:            color.RGBA{0xbb, 0xbb, 0xbb, 0xff},
+	tspb.TestStatus_RUNNING:           color.RGBA{0xbb, 0xbb, 0xbb, 0x00}, // silenced
+	tspb.TestStatus_CATEGORIZED_ABORT: color.RGBA{0xbb, 0xbb, 0xbb, 0x00}, // silenced
+	tspb.TestStatus_UNKNOWN:           color.RGBA{0xbb, 0xbb, 0xbb, 0xff}, // ?
+	tspb.TestStatus_CANCEL:            color.RGBA{0xbb, 0xbb, 0xbb, 0x00}, // silenced
 	tspb.TestStatus_BLOCKED:           color.RGBA{0xbb, 0xbb, 0xbb, 0xff},
-	tspb.TestStatus_TIMED_OUT:         color.RGBA{0xaa, 0, 0, 0xff},
-	tspb.TestStatus_CATEGORIZED_FAIL:  color.RGBA{0xaa, 0, 0, 0xff},
+	tspb.TestStatus_TIMED_OUT:         color.RGBA{0xaa, 0, 0, 0x00}, // silenced
+	tspb.TestStatus_CATEGORIZED_FAIL:  color.RGBA{0xaa, 0, 0, 0x00}, // silenced
 	tspb.TestStatus_BUILD_FAIL:        color.RGBA{0, 0, 0, 0xff},
 	tspb.TestStatus_FAIL:              color.RGBA{0xaa, 0, 0, 0xff},
 	tspb.TestStatus_FLAKY:             color.RGBA{0x66, 0x00, 0x99, 0xff},
@@ -190,7 +190,7 @@ func (i *Image) At(x, y int) color.Color {
 
 	c, ok := colorMap[cell.Result]
 	if !ok {
-		panic(fmt.Sprintf("bad result at %d,%d: %s", x, y, cell.Result))
+		c = colorMap[0]
 	}
 	return MetaColor(c, cell.Icon, cell.Message, cell.CellID)
 }
