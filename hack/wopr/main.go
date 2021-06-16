@@ -30,6 +30,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 SHALL WE PLAY A GAME?
 
 <a href="/toe/new">Tic-tac-toe</a>
+<a href="http://mine-dot-k8s-testgrid.appspot.com/minesweeper/Ov-BAwEBBmFjdGlvbgH_ggABBAEFQm9hcmQB_4gAAQRGbGFnAQIAAQNOZXcBAgABBE9wZW4B_4oAAAAU_4cCAQEFYm9hcmQB_4gAAf-GAAAN_4UCAQL_hgAB_4QAADH_gwMBAv-EAAEEAQRNaW5lAQIAAQRPcGVuAQIAAQRGbGFnAQIAAQVNYXliZQECAAAAH_-JAwEBBVBvaW50Af-KAAECAQFYAQQAAQFZAQQAAAAF_4IDAQA=">Minesweeper</a>
 &nbsp;
 <!-- TODO: easter egg! -->
 <!-- a href="/global-thermonuclear-war">Global Thermo-nuclear War</a -->
