@@ -21,6 +21,8 @@ test_groups:
   gcs_prefix: k8s-testgrid-hackathon/data/e-blackwelder
 - name: fejta
   gcs_prefix: k8s-testgrid-hackathon/data/fejta
+- name: michelle192837
+  gcs_prefix: k8s-testgrid-hackathon/data/michelle192837
 - name: mpherman2
   gcs_prefix: k8s-testgrid-hackathon/data/mpherman2
 
@@ -37,8 +39,30 @@ dashboards:
   - name: cjwagner
     description: cjwagner
     test_group_name: cjwagner
+    open_test_template: # The URL template to visit after clicking on a cell
+      url: http://localhost:8080/toe/move
+      options:
+        - key: g
+          value: <environment>
+        - key: r
+          value: <test-name>
+        - key: c
+          value: <changelist>
+        - key: id
+          value: <test-id>
   - name: e-blackwelder
     description: e-blackwelder
+    open_test_template: # The URL template to visit after clicking on a cell
+      url: http://localhost:8080/toe/move
+      options:
+        - key: g
+          value: <environment>
+        - key: r
+          value: <test-name>
+        - key: c
+          value: <changelist>
+        - key: id
+          value: <test-id>
     test_group_name: e-blackwelder
   - name: fejta
     description: fejta
@@ -46,6 +70,11 @@ dashboards:
   - name: mpherman2
     description: mpherman2
     test_group_name: mpherman2
+    open_test_template: # The URL template to visit after clicking on a cell
+      url: http://k8s-testgrid.appspot.com/pants/col-<changelist>/row-<display-name>/cell-<test-id>
+  - name: michelle192837
+    description: michelle192837
+    test_group_name: michelle192837
 
 default_test_group:
   days_of_results: 15 # Number of days of test results to gather and serve.
@@ -60,7 +89,7 @@ default_test_group:
 
 default_dashboard_tab:
   open_test_template: # The URL template to visit after clicking on a cell
-    url: https://prow.k8s.io/view/gs/<gcs_prefix>/<changelist>
+    url: https://oss-prow.k8s.io/view/gs/<gcs_prefix>/<changelist>
   file_bug_template: # The URL template to visit when filing a bug
     url: # empty
   attach_bug_template: # The URL template to visit when attaching to an existing bug

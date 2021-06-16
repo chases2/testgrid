@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/testgrid/hack/wopr/tictactoe"
+	"github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/hackupdater"
+	"github.com/GoogleCloudPlatform/testgrid/pkg/updater"
+	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
 )
 
 const (
@@ -34,8 +38,17 @@ SHALL WE PLAY A GAME?
 }
 
 func main() {
+	creds := ""
+	confirm := true
+	config, _ := gcs.NewPath("gs://k8s-testgrid-hackathon/config2")
+
+	gcsWrite := func(testGroup string, cols []updater.InflatedColumn) {
+		issues := map[string][]string{}
+		hackupdater.Update(context.Background(), creds, confirm, cols, issues, *config, testGroup)
+	}
+
 	mux := http.NewServeMux()
-	mux.Handle("/toe/", http.StripPrefix("/toe", tictactoe.CreateMux()))
+	mux.Handle("/toe/", http.StripPrefix("/toe", tictactoe.CreateMux(gcsWrite)))
 	mux.HandleFunc("/global-thermonuclear-war", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "the only winning move is not to play")
 	})

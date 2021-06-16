@@ -2,12 +2,17 @@ package tictactoe
 
 import (
 	"fmt"
+	"image/color"
+	"image/draw"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"sync"
 
+	"github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/hackupdater"
+	tgimg "github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/image"
 	"github.com/GoogleCloudPlatform/testgrid/pkg/updater"
 	"gopkg.in/yaml.v2"
 
@@ -26,6 +31,13 @@ const (
 	TG_INSTANCE_FMT = "https://testgrid.k8s.io/r/k8s-testgrid-hackathon/everyone#%s&width=20&sort-by-name=&embed="
 )
 
+var (
+	BOARD_COLOR = color.RGBA{0x66, 0x00, 0x99, 0xff} // purple
+	EMPTY_COLOR = color.RGBA{0, 0xcc, 0x33, 0xff}    // light green
+	X_COLOR     = color.RGBA{R: 0xFF, A: 0xFF}
+	O_COLOR     = color.RGBA{G: 0xFF, A: 0xFF}
+)
+
 type Value int
 
 const (
@@ -33,6 +45,16 @@ const (
 	X
 	O
 )
+
+func (v Value) nextPlayer() Value {
+	switch v {
+	case X:
+		return O
+	case O:
+		return X
+	}
+	panic("Shouldn't call EMPTY.nextPlayer()")
+}
 
 func valueToString(v Value) string {
 	switch v {
@@ -51,7 +73,7 @@ func valueToResult(v Value) statuspb.TestStatus {
 	case O:
 		return statuspb.TestStatus_FAIL
 	}
-	return statuspb.TestStatus_NO_RESULT
+	return statuspb.TestStatus_UNKNOWN
 }
 
 func valueToMessage(v Value) string {
@@ -68,6 +90,8 @@ type Game struct {
 	Turn    Value
 	Winner  Value
 	Message string
+
+	*tgimg.Image
 }
 
 func newGame() *Game {
@@ -76,24 +100,35 @@ func newGame() *Game {
 		// These initialize to 0 (EMPTY)
 		b[i] = make([]Value, BOARD_SIZE)
 	}
+	img, coords := hackupdater.TictactoeBoard(BOARD_COLOR, EMPTY_COLOR)
+	// Populate empty grid with invisible sprites to detect clicks.
+	for i, coord := range coords {
+		log.Printf("%v", coord)
+		emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", "Click me!", strconv.Itoa(i))
+		emptySprite := hackupdater.ASCII(" ", true, emptyColor, emptyColor)
+		bounds := emptySprite.Bounds()
+		r := bounds.Sub(bounds.Min).Add(coord)
+		draw.Draw(img, r, emptySprite, coord, draw.Src)
+	}
 	return &Game{
 		Board: b,
 		Turn:  X,
+		Image: img,
 	}
 }
 
 func (g *Game) tryMove(row, col int) error {
 	if g.Winner != EMPTY {
-		return fmt.Errorf("the game is over, %s won", valueToString(g.Winner))
+		return fmt.Errorf("game over, %s won", valueToString(g.Winner))
 	}
 	if row >= BOARD_SIZE || row < 0 {
-		return fmt.Errorf("board row (%d) must be between 0 and %d", row, BOARD_SIZE)
+		return fmt.Errorf("invalid move: %d, %d", row, col)
 	}
 	if col >= BOARD_SIZE || col < 0 {
-		return fmt.Errorf("board column (%d) must be between 0 and %d", col, BOARD_SIZE)
+		return fmt.Errorf("invalid move: %d, %d", row, col)
 	}
 	if g.Board[row][col] != EMPTY {
-		return fmt.Errorf("already played row %d col %d", row, col)
+		return fmt.Errorf("move already taken: %d, %d", row, col)
 	}
 	g.Board[row][col] = g.Turn
 	// change players
@@ -105,16 +140,19 @@ func (g *Game) tryMove(row, col int) error {
 	return nil
 }
 
+func (g *Game) checkGameOver() {
+	if isOver, winner := g.gameOver(); isOver {
+		g.Winner = winner
+		g.Message = fmt.Sprintf("GAME OVER: the winner is %s!", valueToString(winner))
+	}
+}
+
 // Tries to make a move. If there is an error or the game is one, the banner is updated.
 func (g *Game) makeMove(row, col int) {
 	if err := g.tryMove(row, col); err != nil {
 		g.Message = fmt.Sprintf("Invalid move: %v.", err)
 	} else {
 		g.Message = ""
-	}
-	if winner := g.isWin(); winner != EMPTY {
-		g.Winner = winner
-		g.Message = fmt.Sprintf("GAME OVER: the winner is %s!", valueToString(winner))
 	}
 }
 
@@ -130,11 +168,11 @@ func (g *Game) outputGCS() []updater.InflatedColumn {
 		for row := 0; row < BOARD_SIZE; row++ {
 			val := g.Board[row][col]
 			id := fmt.Sprintf("%d,%d", row, col)
-			cells[strconv.Itoa(row)] = updater.Cell{
+			cells[fmt.Sprintf("%04d", row)] = updater.Cell{
 				Result:  valueToResult(val),
 				Icon:    valueToString(val),
 				CellID:  id,
-				ID:      id,
+				ID:      strconv.Itoa(row),
 				Message: valueToMessage(val),
 			}
 		}
@@ -144,7 +182,7 @@ func (g *Game) outputGCS() []updater.InflatedColumn {
 	return res
 }
 
-func (g *Game) isWin() Value {
+func (g *Game) gameOver() (bool, Value) {
 	// check rows
 	for row := 0; row < BOARD_SIZE; row++ {
 		found := g.Board[row][0]
@@ -155,7 +193,7 @@ func (g *Game) isWin() Value {
 			}
 		}
 		if found != EMPTY {
-			return found
+			return true, found
 		}
 	}
 
@@ -169,7 +207,7 @@ func (g *Game) isWin() Value {
 			}
 		}
 		if found != EMPTY {
-			return found
+			return true, found
 		}
 	}
 
@@ -182,7 +220,7 @@ func (g *Game) isWin() Value {
 		}
 	}
 	if found != EMPTY {
-		return found
+		return true, found
 	}
 
 	// Diagonal Bottom left
@@ -194,14 +232,67 @@ func (g *Game) isWin() Value {
 		}
 	}
 	if found != EMPTY {
-		return found
+		return true, found
 	}
 
-	return EMPTY
+	// Cat's game
+	stalemate := true
+	for row := 0; row < BOARD_SIZE; row++ {
+		for col := 0; col < BOARD_SIZE; col++ {
+			if g.Board[row][col] == EMPTY {
+				stalemate = false
+				break // 2?
+			}
+		}
+	}
+	if stalemate {
+		return true, EMPTY
+	}
+
+	return false, EMPTY
 }
+
+// AI
+type move struct {
+	row int
+	col int
+}
+
+func (g *Game) findMoves() []move {
+	moves := []move{}
+	for row := 0; row < BOARD_SIZE; row++ {
+		for col := 0; col < BOARD_SIZE; col++ {
+			if g.Board[row][col] == EMPTY {
+				moves = append(moves, move{row, col})
+			}
+		}
+	}
+	return moves
+}
+
+func (g *Game) otherPlayerMoves() {
+	if isOver, _ := g.gameOver(); isOver {
+		return
+	}
+	moves := g.findMoves()
+	// Shuffle/randomize
+	for i := range moves {
+		j := rand.Intn(i + 1)
+		moves[i], moves[j] = moves[j], moves[i]
+	}
+
+	// Make move
+	randomMove := moves[0]
+	ai := g.Turn
+	g.Board[randomMove.row][randomMove.col] = ai
+	g.Turn = ai.nextPlayer()
+}
+
+type WriteGCS func(testGroup string, cols []updater.InflatedColumn)
 
 type Server struct {
 	instances map[string]*Game
+	gcsWrite  WriteGCS
 	sync.Mutex
 }
 
@@ -230,8 +321,8 @@ func (s *Server) tryMove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	g.makeMove(row, col)
-
-	// TODO: Have the AI make a move (if player didn't already win)
+	g.otherPlayerMoves()
+	g.checkGameOver()
 
 	// Write game state to GCS
 	if err := s.writeStateGCS(instance); err != nil {
@@ -240,8 +331,8 @@ func (s *Server) tryMove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Redirect to TG (where request came from)
-	// http.Redirect(w, r, fmt.Sprintf(TG_INSTANCE_FMT, instance), http.StatusFound)
-	http.Redirect(w, r, "http://localhost:8080/toe/debug", http.StatusFound)
+	http.Redirect(w, r, fmt.Sprintf(TG_INSTANCE_FMT, instance), http.StatusFound)
+	// http.Redirect(w, r, "http://localhost:8080/toe/debug", http.StatusFound) // Redirect to debugger
 }
 
 func (s *Server) newGame(w http.ResponseWriter, r *http.Request) {
@@ -272,14 +363,15 @@ func (s *Server) debug(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeStateGCS(instance string) error {
-	// output := s.instances[instance].outputGCS()
-	// TODO: handoff
+	game := s.instances[instance]
+	s.gcsWrite(instance, game.Image.Cols)
 	return nil
 }
 
-func CreateMux() http.Handler {
+func CreateMux(gcsWrite WriteGCS) http.Handler {
 	s := &Server{
 		instances: map[string]*Game{INSTANCE: newGame()},
+		gcsWrite:  gcsWrite,
 	}
 
 	mux := http.NewServeMux()
