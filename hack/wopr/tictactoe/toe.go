@@ -367,7 +367,9 @@ func (s *Server) tryMove(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if cell, err = strconv.Atoi(params.Get(PARAM_CELLID)); err == nil {
 		if cell == NEW_GAME_BUTTON_ID {
+			log.Println("Start a new game")
 			s.newGame(w, r)
+			http.Redirect(w, r, fmt.Sprintf(TG_INSTANCE_FMT, instance), http.StatusFound)
 			return
 		}
 		row = cell % 3

@@ -7,4 +7,5 @@ handlers:
 
 env_variables:
   APPENGINE_CONFIRM: "true"
-  
+  APPENGINE_CONFIG: "gs://k8s-testgrid-hackathon/config"
+  APPENGINE_GROUP: "michelle192837"
