@@ -30,6 +30,11 @@ import (
 	"strings"
 	"time"
 
+	// supported image formats
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+
 	"github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/hackupdater"
 	hackimage "github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/image"
 	"github.com/GoogleCloudPlatform/testgrid/pb/test_status"
@@ -53,7 +58,9 @@ type options struct {
 	gridPrefix       string
 	pixelsPath       string
 	pureString       string
-	imagePath        string
+
+	imagePath string
+	dither    bool
 
 	tileSize    int
 	tilePattern string
@@ -103,6 +110,7 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 	fs.StringVar(&o.imagePath, "image-path", "", "Path of image input")
 	fs.IntVar(&o.tileSize, "tile-size", 0, "pixel length of each tile in image if set (otherwise single image")
 	fs.StringVar(&o.tilePattern, "tile-pattern", "", "Path to tile pattern if using tiles, starting with !")
+	fs.BoolVar(&o.dither, "dither", true, "Toggles whether to create dithered images")
 
 	fs.BoolVar(&o.debug, "debug", false, "Log debug lines if set")
 	fs.BoolVar(&o.trace, "trace", false, "Log trace and debug lines if set")
@@ -253,7 +261,7 @@ func main() {
 		img = renderPattern(mapping, size, pattern)
 		out = &img
 	}
-	tgi := renderImage(out)
+	tgi := renderImage(out, opt.dither)
 	hackimage.Print(tgi)
 	hackupdater.Update(ctx, opt.creds, opt.confirm, tgi.Cols, nil, opt.config, opt.group)
 }
@@ -284,12 +292,16 @@ func readPattern(path string) ([][]rune, error) {
 	return runes, nil
 }
 
-func renderImage(img image.Image) *hackimage.Image {
+func renderImage(img image.Image, dither bool) *hackimage.Image {
 	tgi := hackimage.New(img.Bounds())
 	dp := image.Pt(0, 0)
 	bounds := img.Bounds()
 	r := bounds.Sub(bounds.Min).Add(dp)
-	draw.Draw(tgi, r, img, bounds.Min, draw.Src)
+	if dither {
+		draw.FloydSteinberg.Draw(tgi, r, img, bounds.Min)
+	} else {
+		draw.Draw(tgi, r, img, bounds.Min, draw.Src)
+	}
 	return tgi
 }
 

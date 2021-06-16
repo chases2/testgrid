@@ -21,6 +21,8 @@ test_groups:
   gcs_prefix: k8s-testgrid-hackathon/data/e-blackwelder
 - name: fejta
   gcs_prefix: k8s-testgrid-hackathon/data/fejta
+- name: michelle192837
+  gcs_prefix: k8s-testgrid-hackathon/data/michelle192837
 - name: mpherman2
   gcs_prefix: k8s-testgrid-hackathon/data/mpherman2
 
@@ -70,6 +72,9 @@ dashboards:
     test_group_name: mpherman2
     open_test_template: # The URL template to visit after clicking on a cell
       url: http://k8s-testgrid.appspot.com/pants/col-<changelist>/row-<display-name>/cell-<test-id>
+  - name: michelle192837
+    description: michelle192837
+    test_group_name: michelle192837
 
 default_test_group:
   days_of_results: 15 # Number of days of test results to gather and serve.
