@@ -10,6 +10,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 
@@ -35,7 +36,7 @@ const (
 	AI_PLAYER Value = O
 )
 
-var instance = flag.String("instance", "", "e.g. cjwagner or michelle192837")
+var instance = flag.String("instance", os.Getenv("INSTANCE"), "e.g. cjwagner or michelle192837")
 
 var (
 	BOARD_COLOR = color.RGBA{0x66, 0x00, 0x99, 0xff} // purple

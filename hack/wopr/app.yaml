@@ -1,7 +1,5 @@
 service: wopr
-runtime: googlelegacy
-instance_class: F4_HIGHMEM
+runtime: go114
 
-handlers:
-- url: /.*
-  script: auto
+env_variables:
+  INSTANCE: "chases2"

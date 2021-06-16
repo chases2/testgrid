@@ -41,7 +41,7 @@ dashboards:
     description: chases2
     test_group_name: chases2
     open_test_template: # The URL template to visit after clicking on a cell
-      url: http://localhost:8080/toe/move
+      url: https://wopr-dot-k8s-testgrid.appspot.com/toe/move
       options:
       - key: g
         value: <environment>
