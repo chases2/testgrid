@@ -40,7 +40,7 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 	var o options
 	fs.Var(&o.config, "config", "gs://path/to/config.pb")
 	fs.BoolVar(&o.confirm, "confirm", false, "Upload data if set")
-	fs.StringVar(&o.group, "test-group", "unset", "Only update named group if set")
+	fs.StringVar(&o.group, "test-group", "michelle192837", "Only update named group if set")
 	fs.StringVar(&o.url, "url", defaultURL, "Navigate to specified URL after advancing game")
 
 	fs.BoolVar(&o.debug, "debug", true, "Log debug lines if set")
@@ -414,6 +414,20 @@ func main() {
 		logrus.SetLevel(logrus.TraceLevel)
 	case opt.debug:
 		logrus.SetLevel(logrus.DebugLevel)
+	}
+
+	if c := os.Getenv("APPENGINE_CONFIRM"); c == "true" {
+		opt.confirm = true
+	}
+
+	if cfg := os.Getenv("APPENGINE_CONFIG"); cfg != "" {
+		if err := opt.config.Set(cfg); err != nil {
+			logrus.WithError(err).Fatal("Bad config")
+		}
+	}
+
+	if g := os.Getenv("APPENGINE_GROUP"); g != "" {
+		opt.group = g
 	}
 
 	logrus.SetReportCaller(true)

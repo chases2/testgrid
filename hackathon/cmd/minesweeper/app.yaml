@@ -1,0 +1,10 @@
+service: mine
+runtime: go115
+
+handlers:
+- url: /.*
+  script: auto
+
+env_variables:
+  APPENGINE_CONFIRM: "true"
+  
