@@ -1,13 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/gob"
 	"flag"
+	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"math/rand"
+	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/hackupdater"
 	hackimage "github.com/GoogleCloudPlatform/testgrid/hackathon/pkg/image"
@@ -20,10 +27,13 @@ type options struct {
 	config  gcs.Path // gs://path/to/config/proto
 	confirm bool
 	group   string
+	url     string
 
 	debug bool
 	trace bool
 }
+
+const defaultURL = "https://hackathon-dot-k8s-testgrid.appspot.com/r/k8s-testgrid-hackathon/everyone#michelle192837&width=45&sort-by-name="
 
 // gatherOptions reads options from flags
 func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
@@ -31,6 +41,7 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 	fs.Var(&o.config, "config", "gs://path/to/config.pb")
 	fs.BoolVar(&o.confirm, "confirm", false, "Upload data if set")
 	fs.StringVar(&o.group, "test-group", "unset", "Only update named group if set")
+	fs.StringVar(&o.url, "url", defaultURL, "Navigate to specified URL after advancing game")
 
 	fs.BoolVar(&o.debug, "debug", true, "Log debug lines if set")
 	fs.BoolVar(&o.trace, "trace", false, "Log trace and debug lines if set")
@@ -56,30 +67,87 @@ var settings = []setting{
 	{30, 16, 99}, // Expert
 }
 
-type cell struct {
-	mine    bool
-	open    bool
-	flagged bool
+type Cell struct {
+	Mine  bool
+	Open  bool
+	Flag  bool
+	Maybe bool
 }
 
-type board [][]*cell
+func (c Cell) String() string {
+	switch {
+	case c.Flag:
+		return "!"
+	case c.Open && c.Mine:
+		return "*"
+	case !c.Open:
+		return "?"
+	default:
+		return " "
+	}
+}
+
+type board [][]*Cell
+
+func (b board) over() *image.Point {
+	for x, cells := range b {
+		for y, cell := range cells {
+			if cell.Mine && cell.Open {
+				return &image.Point{x, y}
+			}
+		}
+	}
+	return nil
+}
+
+func (b board) String() string {
+	var sb strings.Builder
+	sb.WriteString("\n")
+	sb.WriteString("+")
+	for x := 0; x < b.width(); x++ {
+		sb.WriteString("-")
+	}
+	sb.WriteString("+")
+	sb.WriteString("\n")
+	for y := 0; y < b.height(); y++ {
+		sb.WriteString("|")
+		for x := 0; x < b.width(); x++ {
+			ch := b[x][y].String()
+			if ch == " " {
+				if n := mines(b.neighbors(x, y)); n > 0 {
+					ch = strconv.Itoa(n)
+				}
+			}
+			sb.WriteString(ch)
+		}
+		sb.WriteString("|")
+		sb.WriteString("\n")
+	}
+	sb.WriteString("+")
+	for x := 0; x < b.width(); x++ {
+		sb.WriteString("-")
+	}
+	sb.WriteString("+")
+	sb.WriteString("\n")
+	return sb.String()
+}
 
 func generate(s setting) board {
-	cells := make([][]*cell, 0, s.w)
+	cells := make([][]*Cell, 0, s.w)
 	for col := 0; col < s.w; col++ {
-		cells = append(cells, make([]*cell, s.h))
+		cells = append(cells, make([]*Cell, s.h))
 		for row := 0; row < s.h; row++ {
-			cells[col][row] = &cell{}
+			cells[col][row] = &Cell{}
 		}
 	}
 	// TODO(fejta): maybe better distro, aka ensure solvable.
 	for s.mines > 0 {
 		rw, rh := rand.Intn(s.w), rand.Intn(s.h)
 		cell := cells[rw][rh]
-		if cell.mine {
+		if cell.Mine {
 			continue
 		}
-		cell.mine = true
+		cell.Mine = true
 		s.mines--
 	}
 
@@ -102,10 +170,10 @@ func (b board) open(x, y int) bool {
 	if cell == nil {
 		return false
 	}
-	if cell.open {
+	if cell.Open {
 		return false
 	}
-	b[x][y].open = true
+	b[x][y].Open = true
 	neighbors := b.neighbors(x, y)
 	if mines(neighbors) > 0 {
 		return true
@@ -118,7 +186,7 @@ func (b board) open(x, y int) bool {
 	return true
 }
 
-func (b board) cell(x, y int) *cell {
+func (b board) cell(x, y int) *Cell {
 	if x < 0 || x >= b.width() {
 		return nil
 	}
@@ -128,8 +196,8 @@ func (b board) cell(x, y int) *cell {
 	return b[x][y]
 }
 
-func (b board) neighbors(x, y int) []*cell {
-	cells := make([]*cell, 0, 8)
+func (b board) neighbors(x, y int) []*Cell {
+	cells := make([]*Cell, 0, 8)
 	for dx := -1; dx <= 1; dx++ {
 		for dy := -1; dy <= 1; dy++ {
 			if dx == dy && dy == 0 {
@@ -145,10 +213,10 @@ func (b board) neighbors(x, y int) []*cell {
 	return cells
 }
 
-func mines(neighbors []*cell) int {
+func mines(neighbors []*Cell) int {
 	var found int
 	for _, cell := range neighbors {
-		if cell.mine {
+		if cell.Mine {
 			found++
 		}
 	}
@@ -176,35 +244,164 @@ var (
 	}
 )
 
-func (b board) render() *hackimage.Image {
+var (
+	encoding = base64.URLEncoding
+)
+
+func encode(what interface{}) string {
+	var sb strings.Builder
+	enc := gob.NewEncoder(&sb)
+	if err := enc.Encode(what); err != nil {
+		panic(err)
+	}
+	return encoding.EncodeToString([]byte(sb.String()))
+}
+
+const (
+	removeFlag = "Unflag cell"
+	addFlag    = "Flag cell as mined"
+	unmined    = "Clean and swept"
+	danger     = "Cell is mined, watch out!"
+	unknown    = "Sweep for mines"
+	win        = "You Win!"
+	lose       = "Too bad, try again!"
+)
+
+func (b board) render(flagging bool) *hackimage.Image {
 	w, h := b.width(), b.height()
 	rect := image.Rect(0, 0, w, h)
 
 	img := hackimage.New(rect)
+	over := b.over()
+	var msg string
 	for x := 0; x < w; x++ {
 		for y := 0; y < h; y++ {
 			cell := b.cell(x, y)
 			var c color.Color
-			const id = "fake-id"
+			a := action{
+				Board: &b,
+				Open:  &image.Point{x, y},
+				Flag:  flagging,
+			}
+			id := encode(&a)
+			if x == 0 && y == 0 {
+				fmt.Println("ERICK cell-id", id)
+			}
 			switch {
-			case cell.flagged:
-				c = hackimage.MetaColor(gray, "!", "!", id)
-			case !cell.open:
-				c = hackimage.MetaColor(gray, ".", ".", id)
-			case cell.mine:
-				c = hackimage.MetaColor(red, "*", "*", id)
-			default:
-				m := mines(b.neighbors(x, y))
-				msg := " "
-				if m > 0 {
-					msg = strconv.Itoa(m)
+			case cell.Flag:
+				if flagging {
+					msg = removeFlag
+				} else {
+					msg = danger
 				}
-				c = hackimage.MetaColor(lightGreen, msg, msg, id)
+				var icon string
+				if cell.Maybe {
+					icon = "?"
+				} else {
+					icon = "!"
+				}
+				c = hackimage.MetaColor(gray, icon, msg, id)
+			case !cell.Open && (over == nil || !cell.Mine):
+				if flagging {
+					msg = addFlag
+				} else {
+					msg = unknown
+				}
+				c = hackimage.MetaColor(gray, ".", msg, id)
+			case cell.Mine:
+				if over == nil || over.X != x || over.Y != y {
+					c = black
+				} else {
+					c = red
+				}
+				c = hackimage.MetaColor(c, "*", lose, id)
+			default:
+				icon := " "
+				if m := mines(b.neighbors(x, y)); m > 0 {
+					icon = strconv.Itoa(m)
+					c = lightGreen
+				} else {
+					c = green
+				}
+				c = hackimage.MetaColor(lightGreen, icon, unmined, id)
 			}
 			img.Set(x, y, c)
 		}
 	}
 	return img
+}
+
+func toolbar(act *action) *hackimage.Image {
+	var noop string
+	var w int
+	if act != nil && act.Board != nil {
+		w = act.Board.width()
+		noop = encode(act)
+	}
+	if w < 5 {
+		w = 6
+	}
+	img := hackimage.New(image.Rect(0, 0, w, 1))
+	id := encode(&action{New: true})
+	mid := w / 2
+	newColor := blue
+	img.Set(mid, 0, hackimage.MetaColor(newColor, "N", "New game", id))
+	if act != nil && act.Board != nil {
+		var remain int
+		var closed int
+		for _, cells := range *act.Board {
+			for _, cell := range cells {
+				if cell.Flag {
+					remain--
+				}
+				if cell.Mine {
+					remain++
+				}
+				if !cell.Open && !cell.Mine {
+					closed++
+				}
+			}
+		}
+
+		img.Set(0, 0, hackimage.MetaColor(black, fmt.Sprintf("%03d", remain), fmt.Sprintf("%03d mines remain", remain), noop))
+		var msg string
+		if act.Flag {
+			msg = "Stop flagging"
+		} else {
+			msg = "Flag cells with mines"
+		}
+		id := encode(&action{Board: act.Board, Flag: !act.Flag})
+		var c color.Color
+		if act.Flag {
+			c = red
+		} else {
+			c = gray
+		}
+		img.Set(mid+1, 0, hackimage.MetaColor(c, "F", msg, id))
+	}
+
+	img.Set(w-1, 0, hackimage.MetaColor(black, "123", "123 seconds elapsed", noop))
+	return img
+}
+
+type action struct {
+	Board *board
+	Flag  bool
+	New   bool
+	Open  *image.Point
+}
+
+func decode(path string) (*action, error) {
+	buf, err := encoding.DecodeString(path)
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode: %w", err)
+	}
+	var a action
+	err = gob.NewDecoder(bytes.NewBuffer(buf)).Decode(&a)
+	if err != nil {
+		return nil, fmt.Errorf("gob decode: %w", err)
+	}
+	return &a, nil
 }
 
 func main() {
@@ -224,11 +421,74 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := generate(settings[0])
-	for i := 0; i < 10; i++ {
-		b.open(rand.Intn(b.width()), rand.Intn(b.height()))
+	step := func(act *action) {
+		b := move(act)
+		img := b.render(act != nil && act.Flag)
+		w, h := img.Bounds().Dx(), img.Bounds().Dy()
+		h++
+		if w < 6 {
+			w = 6
+		}
+		if act == nil {
+			act = &action{}
+		}
+		act.Board = b
+		tool := toolbar(act)
+		final := hackimage.New(image.Rect(0, 0, w, h))
+		bounds := final.Bounds()
+		r := bounds.Sub(bounds.Min).Add(image.Point{})
+		draw.Draw(final, r, tool, bounds.Min, draw.Src)
+		r = bounds.Sub(bounds.Min).Add(image.Point{0, 1})
+		draw.Draw(final, r, img, bounds.Min, draw.Src)
+
+		hackimage.Print(img)
+		hackupdater.Update(ctx, "", opt.confirm, final.Cols, nil, opt.config, opt.group)
 	}
-	img := b.render()
-	hackimage.Print(img)
-	hackupdater.Update(ctx, "", opt.confirm, img.Cols, nil, opt.config, opt.group)
+
+	step(nil) // clear board
+
+	const prefix = "/minesweeper/"
+	http.HandleFunc("/minesweeper/", func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path[len(prefix):]
+		act, err := decode(p)
+		if err != nil {
+			w.WriteHeader(500)
+			fmt.Sprintf("Could not decode: %v", err)
+			logrus.WithError(err).Error("failed to decode")
+			return
+		}
+		step(act)
+		http.Redirect(w, r, opt.url, http.StatusFound)
+	})
+
+	fmt.Println("Listening")
+	logrus.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func move(act *action) *board {
+	switch {
+	case act == nil || act.Board == nil || act.New:
+		b := generate(settings[0])
+		return &b
+	case act.Open == nil:
+		return act.Board
+	default:
+		b := *act.Board
+		x, y := act.Open.X, act.Open.Y
+		cell := b[x][y]
+		if act.Flag && !cell.Open {
+			switch {
+			case cell.Maybe:
+				cell.Maybe = false
+				cell.Flag = false
+			case cell.Flag:
+				cell.Maybe = true
+			default:
+				cell.Flag = true
+			}
+		} else {
+			b.open(x, y)
+		}
+		return &b
+	}
 }
