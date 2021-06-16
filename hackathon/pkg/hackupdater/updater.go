@@ -266,7 +266,7 @@ var letterMap = map[string]string{
 .....`,
 }
 
-func ASCII(s string, large bool, fgColor, bgColor color.Color) *hackimage.Image {
+func ASCIIHelper(s string, large bool) [][]bool {
 	var out [][]bool
 
 	var rep string
@@ -286,12 +286,39 @@ func ASCII(s string, large bool, fgColor, bgColor color.Color) *hackimage.Image 
 		}
 		out = append(out, boolLine)
 	}
+
+	return out
+}
+
+func ASCII(s string, large bool, fgColor, bgColor color.Color) *hackimage.Image {
+	out := ASCIIHelper(s, large)
+	return pixelImage(out, fgColor, bgColor)
+}
+
+func ASCIIWord(s string, fgColor, bgColor color.Color) *hackimage.Image {
+	var out [][]bool
+	for _, c := range s {
+		si := ASCIIHelper(string(c), false)
+		if len(out) == 0 {
+			out = si
+		} else {
+			for iRow, row := range si {
+				for i := 0; i < letterGap; i++ {
+					out[iRow] = append(out[iRow], false)
+				}
+				out[iRow] = append(out[iRow], row...)
+			}
+		}
+	}
+
 	return pixelImage(out, fgColor, bgColor)
 }
 
 // TODO: move game board somewhere else
 const (
 	spriteWidth = 21
+	letterWidth = 5
+	letterGap   = 2
 
 	separaterThickness = 1
 	borderThickness    = 2
@@ -354,6 +381,40 @@ func TictactoeBoard(fgColor, bgColor color.Color) (*hackimage.Image, []image.Poi
 	out = addEmptyRow(out, separaterThickness)
 	out, insertionPoints = addSpritesRow(out, insertionPoints, borderThickness+(spriteWidth+separaterThickness)*2)
 	out = addEmptyRow(out, borderThickness)
+
+	return pixelImage(out, fgColor, bgColor), insertionPoints
+}
+
+func TictactoeSideBar(fgColor, bgColor color.Color) (*hackimage.Image, []image.Point) {
+	// Side bar contains 'NEW GAME' button, game stats
+
+	var out [][]bool
+	var insertionPoints []image.Point
+
+	streak := func(num int, b bool) []bool {
+		var out []bool
+		for i := 0; i < num; i++ {
+			out = append(out, b)
+		}
+		return out
+	}
+	// New game button
+	boxWidth := 1 + (letterWidth+letterGap)*5 - letterGap + 1
+	out = append(out, streak(boxWidth, true))
+	// NEW
+	rowAccum := letterWidth
+	insertionPoints = append(insertionPoints, image.Point{X: 1 + letterWidth + letterGap, Y: 1})
+	// GAME
+	rowAccum += letterWidth + letterGap
+	insertionPoints = append(insertionPoints, image.Point{X: 1 + (letterWidth+letterGap)/2, Y: letterWidth + letterGap})
+	// Draw this then the closing line
+	for i := 0; i < rowAccum; i++ {
+		row := streak(boxWidth-2, false)
+		row = append([]bool{true}, row...)
+		row = append(row, true)
+		out = append(out, row)
+	}
+	out = append(out, streak(boxWidth, true))
 
 	return pixelImage(out, fgColor, bgColor), insertionPoints
 }

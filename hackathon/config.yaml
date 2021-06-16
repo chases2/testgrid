@@ -40,6 +40,17 @@ dashboards:
     base_options: width=20&show-stale-tests=
     description: chaodaiG
     test_group_name: chaodaiG
+    open_test_template: # The URL template to visit after clicking on a cell
+      url: http://localhost:8080/toe/move
+      options:
+        - key: g
+          value: <environment>
+        - key: r
+          value: <test-name>
+        - key: c
+          value: <changelist>
+        - key: id
+          value: <test-id>
   - name: chases2
     base_options: width=20&show-stale-tests=
     description: chases2

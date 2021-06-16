@@ -33,16 +33,19 @@ const (
 
 	TG_INSTANCE_FMT = "https://testgrid.k8s.io/r/k8s-testgrid-hackathon/everyone#%s&width=20&sort-by-name=&embed="
 
+	NEW_GAME_BUTTON_ID = 101
+
 	AI_PLAYER Value = O
 )
 
 var instance = flag.String("instance", os.Getenv("INSTANCE"), "e.g. cjwagner or michelle192837")
 
 var (
-	BOARD_COLOR = color.RGBA{0x66, 0x00, 0x99, 0xff} // purple
-	EMPTY_COLOR = color.RGBA{0, 0xcc, 0x33, 0xff}    // light green
-	X_COLOR     = color.RGBA{R: 0xFF, A: 0xFF}
-	O_COLOR     = color.Black
+	BOARD_COLOR   = color.RGBA{0x66, 0x00, 0x99, 0xff} // purple
+	EMPTY_COLOR   = color.RGBA{0, 0xcc, 0x33, 0xff}    // light green
+	SIDEBAR_COLOR = color.RGBA{0xaa, 0xee, 0xbb, 0xff} // green
+	X_COLOR       = color.RGBA{R: 0xFF, A: 0xFF}
+	O_COLOR       = color.Black
 )
 
 type Value int
@@ -125,22 +128,38 @@ func newGame() *Game {
 	g := &Game{
 		Board:    b,
 		Turn:     X,
-		Image:    img,
 		CoordMap: coordMap,
 	}
 	// Populate empty grid with invisible sprites to detect clicks.
 	for i := range coords {
 		emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", "Click me!", strconv.Itoa(i))
 		emptySprite := hackupdater.ASCII(" ", true, emptyColor, emptyColor)
-		g.drawSprite(i, emptySprite)
+		g.drawSprite(img, coords[i], emptySprite)
 	}
+
+	// Create side bar
+	sidebar, coords := hackupdater.TictactoeSideBar(BOARD_COLOR, EMPTY_COLOR)
+	for i, word := range []string{"NEW", "GAME"} {
+		emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", "", strconv.Itoa(NEW_GAME_BUTTON_ID))
+		wordColor := tgimg.MetaColor(BOARD_COLOR, "", "New game", strconv.Itoa(NEW_GAME_BUTTON_ID))
+		tgimg.Print(hackupdater.ASCIIWord(word, wordColor, emptyColor))
+		g.drawSprite(sidebar, coords[i], hackupdater.ASCIIWord(word, wordColor, emptyColor))
+	}
+
+	// Piece them together
+	width, height := img.Bounds().Dx(), img.Bounds().Dy()
+	width += sidebar.Bounds().Dx() + 100
+	g.Image = tgimg.New(image.Rect(0, 0, width, height))
+
+	g.drawSprite(g.Image, image.Point{X: 0, Y: 0}, img)
+	g.drawSprite(g.Image, image.Point{X: img.Bounds().Dx() + 1, Y: 1}, sidebar)
 	return g
 }
 
-func (g *Game) drawSprite(index int, sprite image.Image) {
+func (g *Game) drawSprite(img *tgimg.Image, coord image.Point, sprite image.Image) {
 	bounds := sprite.Bounds()
-	r := bounds.Sub(bounds.Min).Add(g.CoordMap[index])
-	draw.Draw(g.Image, r, sprite, bounds.Min, draw.Src)
+	r := bounds.Sub(bounds.Min).Add(coord)
+	draw.Draw(img, r, sprite, bounds.Min, draw.Src)
 }
 
 func (g *Game) drawMessage() {
@@ -167,7 +186,7 @@ func (g *Game) tryMove(row, col int) error {
 	emptyColor := tgimg.MetaColor(EMPTY_COLOR, "", valueToMessage(g.Turn), strconv.Itoa(i))
 	fgColor := tgimg.MetaColor(valueToColor(g.Turn), "", valueToMessage(g.Turn), strconv.Itoa(i))
 	sprite := hackupdater.ASCII(valueToString(g.Turn), true, fgColor, emptyColor)
-	g.drawSprite(i, sprite)
+	g.drawSprite(g.Image, g.CoordMap[i], sprite)
 	log.Printf("drawing %v", g.Turn)
 	// change players
 	if g.Turn == X {
@@ -347,6 +366,12 @@ func (s *Server) tryMove(w http.ResponseWriter, r *http.Request) {
 	var row, col, cell int
 	var err error
 	if cell, err = strconv.Atoi(params.Get(PARAM_CELLID)); err == nil {
+		if cell == NEW_GAME_BUTTON_ID {
+			log.Println("Start a new game")
+			s.newGame(w, r)
+			http.Redirect(w, r, fmt.Sprintf(TG_INSTANCE_FMT, instance), http.StatusFound)
+			return
+		}
 		row = cell % 3
 		col = cell / 3
 	} else {
