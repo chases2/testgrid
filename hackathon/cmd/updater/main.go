@@ -41,6 +41,8 @@ import (
 	"github.com/GoogleCloudPlatform/testgrid/pkg/updater"
 	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
 
+	"github.com/nfnt/resize"
+
 	"github.com/sirupsen/logrus"
 )
 
@@ -59,8 +61,10 @@ type options struct {
 	pixelsPath       string
 	pureString       string
 
-	imagePath string
-	dither    bool
+	imagePath   string
+	imageWidth  int
+	imageHeight int
+	dither      bool
 
 	tileSize    int
 	tilePattern string
@@ -108,6 +112,8 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 	fs.StringVar(&o.pixelsPath, "pixels-path", "", "Path of pixels input")
 	fs.StringVar(&o.pureString, "pure-string", "", "Strings input")
 	fs.StringVar(&o.imagePath, "image-path", "", "Path of image input")
+	fs.IntVar(&o.imageWidth, "image-width", 0, "Desired image width")
+	fs.IntVar(&o.imageHeight, "image-height", 0, "Desired image height")
 	fs.IntVar(&o.tileSize, "tile-size", 0, "pixel length of each tile in image if set (otherwise single image")
 	fs.StringVar(&o.tilePattern, "tile-pattern", "", "Path to tile pattern if using tiles, starting with !")
 	fs.BoolVar(&o.dither, "dither", true, "Toggles whether to create dithered images")
@@ -246,6 +252,18 @@ func main() {
 		i, _, err := image.Decode(f)
 		if err != nil {
 			logrus.Fatalf("image.Decode(%q): %v", opt.imagePath, err)
+		}
+
+		// Now respect resizing requirements
+		if opt.imageWidth != 0 || opt.imageHeight != 0 {
+			width, height := opt.imageWidth, opt.imageHeight
+			if opt.imageWidth == 0 {
+				width = i.Bounds().Dx() * opt.imageHeight / i.Bounds().Dy()
+			}
+			if opt.imageHeight == 0 {
+				height = i.Bounds().Dy() * opt.imageWidth / i.Bounds().Dx()
+			}
+			i = resize.Resize(uint(width), uint(height), i, resize.NearestNeighbor)
 		}
 		out = i
 		img = hackimage.Gray(i)
