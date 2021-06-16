@@ -263,7 +263,7 @@ func main() {
 			if opt.imageHeight == 0 {
 				height = i.Bounds().Dy() * opt.imageWidth / i.Bounds().Dx()
 			}
-			i = resize.Resize(uint(width), uint(height), i, resize.NearestNeighbor)
+			i = resize.Resize(uint(width), uint(height), i, resize.Lanczos3)
 		}
 		out = i
 		img = hackimage.Gray(i)
