@@ -31,7 +31,7 @@ const (
 	PARAM_COL    = "c"
 	PARAM_CELLID = "id"
 
-	TG_INSTANCE_FMT = "https://testgrid.k8s.io/r/k8s-testgrid-hackathon/everyone#%s&width=20&sort-by-name=&embed="
+	TG_INSTANCE_FMT = "https://hackathon-dot-k8s-testgrid.appspot.com/r/k8s-testgrid-hackathon/everyone#%s&width=20&sort-by-name=&embed="
 
 	NEW_GAME_BUTTON_ID = 101
 
