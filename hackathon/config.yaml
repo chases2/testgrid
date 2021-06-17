@@ -31,6 +31,8 @@ test_groups:
   gcs_prefix: k8s-testgrid-hackathon/data/mpherman2
 - name: minesweeper
   gcs_prefix: k8s-testgrid-hackathon/data/minesweeper
+- name: minesweeperemoji
+  gcs_prefix: k8s-testgrid-hackathon/data/minesweeperemoji
 
 
 dashboards:
@@ -116,6 +118,12 @@ dashboards:
     base_options: width=20&show-stale-tests=
     description: minesweeper
     test_group_name: minesweeper
+    open_test_template: # The URL template to visit after clicking on a cell
+      url: http://localhost:8080/minesweeper/<test-id>
+  - name: minesweeper-plus
+    base_options: width=20&show-stale-tests=
+    description: minesweeper
+    test_group_name: minesweeperemoji
     open_test_template: # The URL template to visit after clicking on a cell
       url: http://localhost:8080/minesweeper/<test-id>
 
