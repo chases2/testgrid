@@ -91,22 +91,22 @@ func MetaColor(c color.Color, icon, message, id string) Color {
 }
 
 var colorMap = map[tspb.TestStatus]color.Color{
-	tspb.TestStatus_NO_RESULT:         color.RGBA{0xff, 0xff, 0xff, 0xff},
-	tspb.TestStatus_PASS:              color.RGBA{0, 0xcc, 0x33, 0xff},
+	tspb.TestStatus_NO_RESULT:         color.RGBA{0xff, 0xff, 0xff, 0xff}, // white
+	tspb.TestStatus_PASS:              color.RGBA{0, 0xcc, 0x33, 0xff},    // green
 	tspb.TestStatus_PASS_WITH_ERRORS:  color.RGBA{0, 0xcc, 0x33, 0xff},
 	tspb.TestStatus_PASS_WITH_SKIPS:   color.RGBA{0, 0xcc, 0x33, 0xff},
-	tspb.TestStatus_RUNNING:           color.RGBA{0xbb, 0xbb, 0xbb, 0x00}, // silenced
-	tspb.TestStatus_CATEGORIZED_ABORT: color.RGBA{0xbb, 0xbb, 0xbb, 0x00}, // silenced
-	tspb.TestStatus_UNKNOWN:           color.RGBA{0xbb, 0xbb, 0xbb, 0xff}, // ?
-	tspb.TestStatus_CANCEL:            color.RGBA{0xbb, 0xbb, 0xbb, 0x00}, // silenced
+	tspb.TestStatus_RUNNING:           color.RGBA{0xbb, 0xbb, 0xbb, 0xff}, // gray
+	tspb.TestStatus_CATEGORIZED_ABORT: color.RGBA{0xbb, 0xbb, 0xbb, 0xff},
+	tspb.TestStatus_UNKNOWN:           color.RGBA{0xbb, 0xbb, 0xbb, 0xff},
+	tspb.TestStatus_CANCEL:            color.RGBA{0xbb, 0xbb, 0xbb, 0xff},
 	tspb.TestStatus_BLOCKED:           color.RGBA{0xbb, 0xbb, 0xbb, 0xff},
-	tspb.TestStatus_TIMED_OUT:         color.RGBA{0xaa, 0, 0, 0x00}, // silenced
-	tspb.TestStatus_CATEGORIZED_FAIL:  color.RGBA{0xaa, 0, 0, 0x00}, // silenced
-	tspb.TestStatus_BUILD_FAIL:        color.RGBA{0, 0, 0, 0xff},
+	tspb.TestStatus_TIMED_OUT:         color.RGBA{0xaa, 0, 0, 0xff}, // red
+	tspb.TestStatus_CATEGORIZED_FAIL:  color.RGBA{0xaa, 0, 0, 0xff},
+	tspb.TestStatus_BUILD_FAIL:        color.RGBA{0, 0, 0, 0xff}, // black
 	tspb.TestStatus_FAIL:              color.RGBA{0xaa, 0, 0, 0xff},
-	tspb.TestStatus_FLAKY:             color.RGBA{0x66, 0x00, 0x99, 0xff},
+	tspb.TestStatus_FLAKY:             color.RGBA{0x66, 0x00, 0x99, 0xff}, // purple
 	tspb.TestStatus_TOOL_FAIL:         color.RGBA{0xaa, 0, 0, 0xff},
-	tspb.TestStatus_BUILD_PASSED:      color.RGBA{0xaa, 0xee, 0xbb, 0xff},
+	tspb.TestStatus_BUILD_PASSED:      color.RGBA{0xaa, 0xee, 0xbb, 0xff}, // light green
 }
 
 var palette = color.Palette{

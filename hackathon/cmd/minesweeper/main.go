@@ -282,10 +282,12 @@ func (b board) render(act *action) *hackimage.Image {
 			cell := b.cell(x, y)
 			var c color.Color
 			a := action{
-				Board: &b,
-				Open:  &image.Point{x, y},
-				Flag:  flagging,
-				Start: act.Start,
+				Board:      &b,
+				Open:       &image.Point{x, y},
+				Flag:       flagging,
+				Start:      act.Start,
+				Difficulty: act.Difficulty,
+				Emoji:      act.Emoji,
 			}
 			id := encode(&a)
 			switch {
@@ -297,9 +299,12 @@ func (b board) render(act *action) *hackimage.Image {
 				}
 				var icon string
 				if cell.Maybe {
-					icon = "?"
+					icon = act.icon("❓")
+				} else if over == nil || cell.Mine {
+					icon = act.icon("🧨")
 				} else {
-					icon = "!"
+					icon = act.icon("❌")
+					msg = "No mine here"
 				}
 				c = hackimage.MetaColor(gray, icon, msg, id)
 			case !cell.Open && (over == nil || !cell.Mine):
@@ -310,12 +315,15 @@ func (b board) render(act *action) *hackimage.Image {
 				}
 				c = hackimage.MetaColor(gray, ".", msg, id)
 			case cell.Mine:
+				var icon string
 				if over == nil || over.X != x || over.Y != y {
 					c = black
+					icon = act.icon("💣")
 				} else {
 					c = red
+					icon = act.icon("💥")
 				}
-				c = hackimage.MetaColor(c, "*", lose, id)
+				c = hackimage.MetaColor(c, icon, lose, id)
 			default:
 				icon := " "
 				if m := mines(b.neighbors(x, y)); m > 0 {
@@ -339,13 +347,16 @@ func toolbar(act *action) *hackimage.Image {
 		w = act.Board.width()
 		noop = encode(act)
 	}
-	if w < 5 {
-		w = 6
+	if w < minWidth {
+		w = minWidth
 	}
-	img := hackimage.New(image.Rect(0, 0, w, 1))
-	id := encode(&action{New: true})
+	img := hackimage.New(image.Rect(0, 0, w, 2))
+	id := encode(&action{
+		New:        true,
+		Difficulty: act.Difficulty,
+		Emoji:      act.Emoji,
+	})
 	mid := w / 2
-	newColor := blue
 	var seconds int64
 	if act != nil && act.Board != nil {
 		var remain int
@@ -362,7 +373,6 @@ func toolbar(act *action) *hackimage.Image {
 				if !cell.Open && !cell.Mine {
 					closed++
 				}
-
 				if cell.Open && cell.Mine {
 					boom = true
 				}
@@ -372,13 +382,13 @@ func toolbar(act *action) *hackimage.Image {
 		var icon string
 		switch {
 		case boom:
-			icon = "😖"
+			icon = act.icon("😖")
 		case closed == 0:
-			icon = "😎"
+			icon = act.icon("😎")
 		default:
-			icon = "😐"
+			icon = act.icon("😐")
 		}
-		img.Set(mid, 0, hackimage.MetaColor(newColor, icon, "New game", id))
+		img.Set(mid, 0, hackimage.MetaColor(gray, icon, "New game", id))
 
 		img.Set(0, 0, hackimage.MetaColor(black, fmt.Sprintf("%03d", remain), fmt.Sprintf("%03d mines remain", remain), noop))
 		var msg string
@@ -387,22 +397,52 @@ func toolbar(act *action) *hackimage.Image {
 		} else {
 			msg = "Flag cells with mines"
 		}
-		id := encode(&action{Board: act.Board, Flag: !act.Flag, Start: act.Start})
+		id := encode(&action{
+			Board:      act.Board,
+			Flag:       !act.Flag,
+			Start:      act.Start,
+			Difficulty: act.Difficulty,
+			Emoji:      act.Emoji,
+		})
 		var c color.Color
 		if act.Flag {
-			c = red
+			c = blue
 		} else {
 			c = gray
 		}
-		img.Set(mid+1, 0, hackimage.MetaColor(c, "🚩", msg, id))
+		img.Set(1, 0, hackimage.MetaColor(c, act.icon("⛳"), msg, id))
+		id = encode(&action{
+			Board:      act.Board,
+			Flag:       act.Flag,
+			Start:      act.Start,
+			Difficulty: act.Difficulty,
+			Emoji:      !act.Emoji,
+		})
+		if act.Emoji {
+			icon = "A"
+			msg = "Ascii graphics"
+		} else {
+			icon = "🤪"
+			msg = "Fancy graphics"
+		}
+		img.Set(2, 0, hackimage.MetaColor(c, icon, msg, id))
 		seconds = time.Now().Unix() - act.Start
 		if seconds > 999 {
 			logrus.WithField("seconds", seconds).Warning("Truncating time")
 			seconds = 999
 		}
 	} else {
-		img.Set(mid, 0, hackimage.MetaColor(newColor, "😐", "New game", id))
+		img.Set(mid, 0, hackimage.MetaColor(gray, act.icon("😐"), "New game", id))
 		seconds = 0
+	}
+	if w > 9 {
+		drawSettings(act, img, mid+2)
+	} else {
+		drawSettings(act, img, mid+1)
+	}
+
+	for x := 0; x < w; x++ {
+		img.Set(x, 1, hackimage.MetaColor(black, "=", "", encode(act)))
 	}
 
 	s := fmt.Sprintf("%03d", seconds)
@@ -410,12 +450,71 @@ func toolbar(act *action) *hackimage.Image {
 	return img
 }
 
+func drawSettings(act *action, img draw.Image, x int) {
+	for i, diff := range []string{"Beginner", "Intermediate", "Expert"} {
+		set := settings[i]
+		var a *action
+		var c color.Color
+		if i == act.Difficulty {
+			c = blue
+			a = act
+		} else {
+			c = gray
+			a = &action{
+				New:        true,
+				Difficulty: i,
+				Emoji:      act.Emoji,
+			}
+		}
+		id := encode(a)
+		var icon string
+		switch i {
+		case 0:
+			icon = act.icon("👶")
+		case 1:
+			icon = act.icon("👧")
+		default:
+			icon = act.icon("👵")
+		}
+		c = hackimage.MetaColor(c, icon, fmt.Sprintf("Change difficulty to %s: %dx%d (%d mines)", diff, set.w, set.h, set.mines), id)
+		img.Set(x+i, 0, c)
+	}
+}
+
 type action struct {
-	Board *board
-	Flag  bool
-	New   bool
-	Open  *image.Point
-	Start int64
+	Board      *board
+	Flag       bool
+	New        bool
+	Open       *image.Point
+	Start      int64
+	Difficulty int
+	Emoji      bool
+}
+
+var emojis = map[string]string{
+	"😖": "N",
+	"😎": "N",
+	"😐": "N",
+	"⛳": "F",
+	"❓": "?",
+	"🧨": "!",
+	"❌": "X",
+	"💣": "*",
+	"💥": "*",
+	"👶": ".",
+	"👧": "..",
+	"👵": "...",
+}
+
+func (a action) icon(s string) string {
+	if a.Emoji {
+		return s
+	}
+	boring, ok := emojis[s]
+	if !ok {
+		return s
+	}
+	return boring
 }
 
 func decode(path string) (*action, error) {
@@ -430,6 +529,8 @@ func decode(path string) (*action, error) {
 	}
 	return &a, nil
 }
+
+const minWidth = 9
 
 func main() {
 	opt := gatherOptions()
@@ -476,23 +577,23 @@ func main() {
 		act = move(act)
 		img := act.Board.render(act)
 		w, h := img.Bounds().Dx(), img.Bounds().Dy()
-		h++
-		if w < 6 {
-			w = 6
+		h += 2
+		if w < minWidth {
+			w = minWidth
 		}
 		tool := toolbar(act)
 		final := hackimage.New(image.Rect(0, 0, w, h))
 		bounds := final.Bounds()
 		r := bounds.Sub(bounds.Min).Add(image.Point{})
 		draw.Draw(final, r, tool, bounds.Min, draw.Src)
-		r = bounds.Sub(bounds.Min).Add(image.Point{0, 1})
+		r = bounds.Sub(bounds.Min).Add(image.Point{0, 2})
 		draw.Draw(final, r, img, bounds.Min, draw.Src)
 
 		hackimage.Print(img)
 		hackupdater.Update(ctx, "", opt.confirm, final.Cols, nil, opt.config, opt.group)
 	}
 
-	step(nil) // clear board
+	step(nil) // clear board on start
 
 	const prefix = "/minesweeper/"
 	http.HandleFunc("/minesweeper/", func(w http.ResponseWriter, r *http.Request) {
@@ -513,12 +614,17 @@ func main() {
 }
 
 func move(act *action) *action {
+	if act == nil {
+		act = &action{}
+	}
 	switch {
-	case act == nil || act.Board == nil || act.New:
-		b := generate(settings[0])
+	case act.Board == nil || act.New:
+		b := generate(settings[act.Difficulty])
 		return &action{
-			Board: &b,
-			Start: time.Now().Unix(),
+			Board:      &b,
+			Start:      time.Now().Unix(),
+			Difficulty: act.Difficulty,
+			Emoji:      act.Emoji,
 		}
 	case act.Open == nil:
 		return act
