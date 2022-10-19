@@ -59,6 +59,7 @@ genproto() {
         "--proto_path=$dest" \
         "--proto_path=$_virtual_imports/timestamp_proto" \
         "--go_out=${grpc},${importmap}:$dest" \
+        "--dart_out=grpc:${dest}/app/lib/pb" \
         "$1"
   )
   tmp=$(mktemp)
