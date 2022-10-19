@@ -13,6 +13,7 @@ filegroup(
         exclude = [
             "bazel-*/**",
             ".git/**",
+            "app/**",
         ],
     ),
     visibility = ["//visibility:private"],
