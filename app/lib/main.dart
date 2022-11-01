@@ -1,4 +1,3 @@
-import 'dart:html';
 import 'dart:convert';
 
 import 'package:app/pb/api/v1/data.pbgrpc.dart';
@@ -32,13 +31,13 @@ class ConfigReader extends StatefulWidget {
   final String title;
 
   @override
-  State<ConfigReader> createState() => _ConfigReaderState();
+  State<ConfigReader> createState() => ConfigReaderState();
 }
 
-class _ConfigReaderState extends State<ConfigReader> {
+class ConfigReaderState extends State<ConfigReader> {
   // TODO(chases2): add an input box to the widget for scope
   final String _scope = "gs://slchase-testgrid";
-  List<String> _list = ['Press Button to call API'];
+  List<String> list = ['Press Button to call API'];
 
   final stub = TestGridDataClient(ClientChannel('localhost',
       port: 50051,
@@ -59,13 +58,13 @@ class _ConfigReaderState extends State<ConfigReader> {
       httpResp = await fetchDashboardNames(http.Client());
     } catch (_) {
       setState(() {
-        _list = ['API unavailable'];
+        list = ['API unavailable'];
       });
       return;
     }
     if (httpResp.statusCode != 200) {
       setState(() {
-        _list = [
+        list = [
           'Error with API call: ${httpResp!.statusCode}',
           httpResp.body,
         ];
@@ -76,7 +75,7 @@ class _ConfigReaderState extends State<ConfigReader> {
         resp.mergeFromProto3Json(jsonDecode(httpResp.body));
       } catch (e) {
         setState(() {
-          _list = ['API response is invalid'];
+          list = ['API response is invalid'];
         });
         return;
       }
@@ -89,7 +88,7 @@ class _ConfigReaderState extends State<ConfigReader> {
     }
 
     setState(() {
-      _list = dashNames;
+      list = dashNames;
     });
   }
 
@@ -100,7 +99,7 @@ class _ConfigReaderState extends State<ConfigReader> {
       appBar: AppBar(
         title: Text(widget.title),
       ),
-      body: Center(child: getTextListWidget(_list)),
+      body: Center(child: getTextListWidget(list)),
       floatingActionButton: FloatingActionButton(
         onPressed: getAllDashboardNames,
         tooltip: 'Call API',

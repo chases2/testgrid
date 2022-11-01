@@ -10,21 +10,47 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:app/main.dart';
 
+Widget createConfigWidget() =>
+    MaterialApp(home: ConfigReader(title: 'Config Reader Test'));
+
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  group('Config Example Tests', () {
+    testWidgets('Widget contains controls on init',
+        (WidgetTester tester) async {
+      // Build our app and trigger a frame.
+      await tester.pumpWidget(createConfigWidget());
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+      expect(find.text('Config Reader Test'), findsOneWidget);
+      expect(find.text('Press Button to call API'), findsOneWidget);
+      expect(find.byTooltip("Call API"), findsOneWidget);
+    });
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+    testWidgets('Widget displays error if API is unavailable',
+        (WidgetTester tester) async {
+      // Build our app and trigger a frame.
+      await tester.pumpWidget(createConfigWidget());
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+      expect(find.byTooltip("Call API"), findsOneWidget);
+
+      await tester.tap(find.byTooltip("Call API"));
+      await tester.pumpAndSettle(Duration(seconds: 1));
+      expect(find.text('Error with API call: 400'), findsOneWidget);
+    });
+
+    testWidgets('Widget displays info', (WidgetTester tester) async {
+      // Generally state should be private
+      // TODO(chases2): Decouple the API-calling logic and the widget-reading
+      //   logic so we can "mock an API" instead of mocking data
+      await tester.pumpWidget(createConfigWidget());
+      var state = tester.state(find.byType(ConfigReader)) as ConfigReaderState;
+      state.setState(() {
+        state.list = ["foo", "bar"];
+      });
+
+      await tester.pump();
+
+      expect(find.text("foo"), findsOneWidget);
+      expect(find.text("bar"), findsOneWidget);
+    });
   });
 }
