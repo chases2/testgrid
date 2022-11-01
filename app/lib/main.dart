@@ -38,11 +38,6 @@ class ConfigReader extends StatefulWidget {
 class _ConfigReaderState extends State<ConfigReader> {
   // TODO(chases2): add an input box to the widget for scope
   final String _scope = "gs://slchase-testgrid";
-  final List<String> _error = [
-    'Error with API call; check console',
-    'Is the API running at localhost:8080?'
-  ];
-
   List<String> _list = ['Press Button to call API'];
 
   final stub = TestGridDataClient(ClientChannel('localhost',
@@ -59,17 +54,31 @@ class _ConfigReaderState extends State<ConfigReader> {
   void getAllDashboardNames() async {
     ListDashboardResponse resp = ListDashboardResponse();
 
-    var httpResp = await fetchDashboardNames(http.Client());
+    http.Response? httpResp;
+    try {
+      httpResp = await fetchDashboardNames(http.Client());
+    } catch (_) {
+      setState(() {
+        _list = ['API unavailable'];
+      });
+      return;
+    }
     if (httpResp.statusCode != 200) {
       setState(() {
-        _list = _error;
+        _list = [
+          'Error with API call: ${httpResp!.statusCode}',
+          httpResp.body,
+        ];
       });
       return;
     } else {
       try {
         resp.mergeFromProto3Json(jsonDecode(httpResp.body));
       } catch (e) {
-        // TODO(chases2): handle error
+        setState(() {
+          _list = ['API response is invalid'];
+        });
+        return;
       }
     }
 
