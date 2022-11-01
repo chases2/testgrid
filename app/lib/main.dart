@@ -1,6 +1,10 @@
+import 'dart:html';
+import 'dart:convert';
+
 import 'package:app/pb/api/v1/data.pbgrpc.dart';
 import 'package:flutter/material.dart';
 import 'package:grpc/grpc.dart';
+import 'package:http/http.dart' as http;
 
 void main() {
   runApp(const MyApp());
@@ -32,11 +36,11 @@ class ConfigReader extends StatefulWidget {
 }
 
 class _ConfigReaderState extends State<ConfigReader> {
-  // TODO(slchase): add an input box to the widget for scope
+  // TODO(chases2): add an input box to the widget for scope
   final String _scope = "gs://slchase-testgrid";
   final List<String> _error = [
     'Error with API call; check console',
-    'Is the API running at localhost:50051?'
+    'Is the API running at localhost:8080?'
   ];
 
   List<String> _list = ['Press Button to call API'];
@@ -46,22 +50,34 @@ class _ConfigReaderState extends State<ConfigReader> {
       options:
           const ChannelOptions(credentials: ChannelCredentials.insecure())));
 
+  Future<http.Response> fetchDashboardNames(http.Client client) async {
+    // TODO(chases2): instantiate a client and actually use it
+    return http.get(
+        Uri.parse('http://localhost:8080/api/v1/dashboards?scope=$_scope'));
+  }
+
   void getAllDashboardNames() async {
-    ListDashboardResponse resp;
-    try {
-      resp = await stub.listDashboard(ListDashboardRequest(
-        scope: _scope,
-      ));
-    } catch (e) {
+    ListDashboardResponse resp = ListDashboardResponse();
+
+    var httpResp = await fetchDashboardNames(http.Client());
+    if (httpResp.statusCode != 200) {
       setState(() {
         _list = _error;
       });
-      rethrow;
+      return;
+    } else {
+      try {
+        resp.mergeFromProto3Json(jsonDecode(httpResp.body));
+      } catch (e) {
+        // TODO(chases2): handle error
+      }
     }
 
     List<String> dashNames = [];
 
-    resp.dashboards.forEach((dashboard) => dashNames.add(dashboard.name));
+    for (var dashboard in resp.dashboards) {
+      dashNames.add(dashboard.name);
+    }
 
     setState(() {
       _list = dashNames;
