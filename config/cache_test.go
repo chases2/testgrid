@@ -23,6 +23,8 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/golang/protobuf/proto"
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/testing/protocmp"
 
 	configpb "github.com/GoogleCloudPlatform/testgrid/pb/config"
 	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
@@ -62,7 +64,11 @@ func Test_ReadGCS(t *testing.T) {
 			name: "don't read if too recent",
 			currentCache: map[string]Config{
 				"gs://example": {
-					proto:     expectedConfig,
+					proto: expectedConfig,
+					attrs: &storage.ReaderObjectAttrs{
+						LastModified: now,
+						Generation:   1,
+					},
 					lastFetch: now,
 				},
 			},
@@ -94,23 +100,30 @@ func Test_ReadGCS(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			cache = test.currentCache
 			client := fake.Client{
-				Opener: fake.Opener{},
-			}
-
-			client.Opener[mustPath("gs://example")] = fake.Object{
-				Data: string(test.remoteData),
-				Attrs: &storage.ReaderObjectAttrs{
-					LastModified: test.remoteLastModified,
-					Generation:   test.remoteGeneration,
+				Opener: fake.Opener{
+					Paths: map[gcs.Path]fake.Object{},
 				},
 			}
-			result, err := ReadGCS(context.Background(), &client, mustPath("gs://example"))
+			expectedAttrs := &storage.ReaderObjectAttrs{
+				LastModified: test.remoteLastModified,
+				Generation:   test.remoteGeneration,
+			}
+
+			client.Opener.Paths[mustPath("gs://example")] = fake.Object{
+				Data:  string(test.remoteData),
+				Attrs: expectedAttrs,
+			}
+			result, attrs, err := ReadGCS(context.Background(), &client, mustPath("gs://example"))
 			if err != nil {
 				t.Errorf("Unexpected error %v", err)
 			}
-			if !proto.Equal(expectedConfig, result) {
-				t.Errorf("Expected %v, got %v", expectedConfig, result)
+			if diff := cmp.Diff(expectedAttrs, attrs, protocmp.Transform()); diff != "" {
+				t.Errorf("Attributes differed (-want, +got): %s", diff)
 			}
+			if diff := cmp.Diff(expectedConfig, result, protocmp.Transform()); diff != "" {
+				t.Errorf("Config differed (-want, +got): %s ", diff)
+			}
+
 		})
 	}
 }

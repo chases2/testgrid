@@ -163,6 +163,104 @@ func TestCustomStatus(t *testing.T) {
 			}),
 		},
 		{
+			name: "not equal, string",
+			rules: []*evalpb.Rule{
+				{
+					ComputedStatus: tspb.TestStatus_TIMED_OUT,
+					TestResultComparisons: []*evalpb.TestResultComparison{
+						{
+							TestResultInfo: &evalpb.TestResultComparison_PropertyKey{
+								PropertyKey: "foo",
+							},
+							Comparison: &evalpb.Comparison{
+								Op: evalpb.Comparison_OP_NE,
+								ComparisonValue: &evalpb.Comparison_StringValue{
+									StringValue: "goal",
+								},
+							},
+						},
+					},
+				},
+			},
+			tr: makeResult(map[string][]string{
+				"foo": {"no"},
+			}),
+			want: &timedOut,
+		},
+		{
+			name: "not equal, string, is equal",
+			rules: []*evalpb.Rule{
+				{
+					ComputedStatus: tspb.TestStatus_TIMED_OUT,
+					TestResultComparisons: []*evalpb.TestResultComparison{
+						{
+							TestResultInfo: &evalpb.TestResultComparison_PropertyKey{
+								PropertyKey: "foo",
+							},
+							Comparison: &evalpb.Comparison{
+								Op: evalpb.Comparison_OP_NE,
+								ComparisonValue: &evalpb.Comparison_StringValue{
+									StringValue: "goal",
+								},
+							},
+						},
+					},
+				},
+			},
+			tr: makeResult(map[string][]string{
+				"foo": {"goal"},
+			}),
+		},
+		{
+			name: "string contains",
+			rules: []*evalpb.Rule{
+				{
+					ComputedStatus: tspb.TestStatus_TIMED_OUT,
+					TestResultComparisons: []*evalpb.TestResultComparison{
+						{
+							TestResultInfo: &evalpb.TestResultComparison_PropertyKey{
+								PropertyKey: "foo",
+							},
+							Comparison: &evalpb.Comparison{
+								Op: evalpb.Comparison_OP_CONTAINS,
+								ComparisonValue: &evalpb.Comparison_StringValue{
+									StringValue: "goal",
+								},
+							},
+						},
+					},
+				},
+			},
+			tr: makeResult(map[string][]string{
+				"foo": {"this is the goal"},
+			}),
+			want: &timedOut,
+		},
+		{
+			name: "string does not contains",
+			rules: []*evalpb.Rule{
+				{
+					ComputedStatus: tspb.TestStatus_TIMED_OUT,
+					TestResultComparisons: []*evalpb.TestResultComparison{
+						{
+							TestResultInfo: &evalpb.TestResultComparison_PropertyKey{
+								PropertyKey: "foo",
+							},
+							Comparison: &evalpb.Comparison{
+								Op: evalpb.Comparison_OP_CONTAINS,
+								ComparisonValue: &evalpb.Comparison_StringValue{
+									StringValue: "goal",
+								},
+							},
+						},
+					},
+				},
+			},
+			tr: makeResult(map[string][]string{
+				"foo": {"i am not a matching message"},
+			}),
+		},
+		{
 			name: "missing property",
 			rules: []*evalpb.Rule{
 				{
@@ -269,6 +367,119 @@ func TestCustomStatus(t *testing.T) {
 			case *tc.want != *got:
 				t.Errorf("customStatus() got %v, want %v", *got, *tc.want)
 
+			}
+		})
+	}
+}
+
+type fakeTargetResult struct {
+	targetStatus tspb.TestStatus
+}
+
+func (r fakeTargetResult) TargetStatus() tspb.TestStatus {
+	return r.targetStatus
+}
+
+func makeTargetResult(status tspb.TestStatus) *fakeTargetResult {
+	return &fakeTargetResult{
+		targetStatus: status,
+	}
+}
+
+func TestCustomTargetStatus(t *testing.T) {
+	abort := tspb.TestStatus_CATEGORIZED_ABORT
+	cases := []struct {
+		name  string
+		rules []*evalpb.Rule
+		tgr   TargetResult
+		want  *tspb.TestStatus
+	}{
+		{
+			name: "empty",
+		},
+		{
+			name: "target status equal",
+			rules: []*evalpb.Rule{
+				{
+					ComputedStatus: tspb.TestStatus_CATEGORIZED_ABORT,
+					TestResultComparisons: []*evalpb.TestResultComparison{
+						{
+							TestResultInfo: &evalpb.TestResultComparison_TargetStatus{
+								TargetStatus: true,
+							},
+							Comparison: &evalpb.Comparison{
+								Op: evalpb.Comparison_OP_EQ,
+								ComparisonValue: &evalpb.Comparison_TargetStatusValue{
+									TargetStatusValue: tspb.TestStatus_TOOL_FAIL,
+								},
+							},
+						},
+					},
+				},
+			},
+			tgr:  makeTargetResult(tspb.TestStatus_TOOL_FAIL),
+			want: &abort,
+		},
+		{
+			name: "target status not equal",
+			rules: []*evalpb.Rule{
+				{
+					ComputedStatus: tspb.TestStatus_TIMED_OUT,
+					TestResultComparisons: []*evalpb.TestResultComparison{
+						{
+							TestResultInfo: &evalpb.TestResultComparison_TargetStatus{
+								TargetStatus: true,
+							},
+							Comparison: &evalpb.Comparison{
+								Op: evalpb.Comparison_OP_EQ,
+								ComparisonValue: &evalpb.Comparison_TargetStatusValue{
+									TargetStatusValue: tspb.TestStatus_CATEGORIZED_ABORT,
+								},
+							},
+						},
+					},
+				},
+			},
+			tgr:  makeTargetResult(tspb.TestStatus_TOOL_FAIL),
+			want: nil,
+		},
+		{
+			name: "target status comparation not enabled",
+			rules: []*evalpb.Rule{
+				{
+					ComputedStatus: tspb.TestStatus_CATEGORIZED_ABORT,
+					TestResultComparisons: []*evalpb.TestResultComparison{
+						{
+							TestResultInfo: &evalpb.TestResultComparison_PropertyKey{
+								PropertyKey: "want",
+							},
+							Comparison: &evalpb.Comparison{
+								Op: evalpb.Comparison_OP_EQ,
+								ComparisonValue: &evalpb.Comparison_TargetStatusValue{
+									TargetStatusValue: tspb.TestStatus_TOOL_FAIL,
+								},
+							},
+						},
+					},
+				},
+			},
+			tgr:  makeTargetResult(tspb.TestStatus_TOOL_FAIL),
+			want: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CustomTargetStatus(tc.rules, tc.tgr)
+			switch {
+			case got == nil:
+				if tc.want != nil {
+					t.Errorf("CustomTargetStatus() got nil, want %v", tc.want)
+				}
+			case tc.want == nil:
+				t.Errorf("CustomTargetStatus() should be nil, not %v", got)
+			case *tc.want != *got:
+				t.Errorf("CustomTargetStatus() got %v, want %v", *got, *tc.want)
 			}
 		})
 	}

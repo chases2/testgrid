@@ -2,11 +2,13 @@
 
 reviewers:
 - chases2
-- fejta
+- sultan-duisenbay
 - michelle192837
 
 approvers:
 - chases2
-- e-blackwelder
-- fejta
+- sultan-duisenbay
 - michelle192837
+
+emeritus_approvers:
+- fejta

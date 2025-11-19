@@ -261,6 +261,19 @@ func SplitCells(originalName string, cells ...Cell) map[string]Cell {
 	return out
 }
 
+// ignoreStatus returns whether to ignore (equate to "NO_RESULT") a given status based on configuration.
+func ignoreStatus(opt groupOptions, status statuspb.TestStatus) bool {
+	if status == statuspb.TestStatus_NO_RESULT {
+		return true
+	}
+	if opt.ignoreSkip && status == statuspb.TestStatus_PASS_WITH_SKIPS {
+		return true
+	}
+	// TODO(michelle192837): Implement `ignore_built`, e.g. ignore statuspb.TestStatus_BUILD_PASSED.
+	// TODO(michelle192837): Implement `ignore_pending`, e.g. ignore statuspb.TestStatus_RUNNING.
+	return false
+}
+
 // convertResult returns an InflatedColumn representation of the GCS result.
 func convertResult(log logrus.FieldLogger, nameCfg nameConfig, id string, headers []string, result gcsResult, opt groupOptions) InflatedColumn {
 	cells := map[string][]Cell{}
@@ -277,7 +290,8 @@ func convertResult(log logrus.FieldLogger, nameCfg nameConfig, id string, header
 	// Append each result into the column
 	for _, suite := range result.suites {
 		for _, r := range flattenResults(suite.Suites.Suites...) {
-			if r.Skipped != nil && r.Skipped.Value == "" {
+			// "skipped" is the string that is always appended when the test is skipped without any reason in Ginkgo V2, e.g., "focus" is specified, and the test is skipped.
+			if r.Skipped != nil && r.Skipped.Value == "" && (r.Skipped.Message == "skipped" || r.Skipped.Message == "") {
 				continue
 			}
 			c := Cell{CellID: cellID}
@@ -318,6 +332,10 @@ func convertResult(log logrus.FieldLogger, nameCfg nameConfig, id string, header
 
 			if override := CustomStatus(opt.rules, jUnitTestResult{&r}); override != nil {
 				c.Result = *override
+			}
+
+			if ignoreStatus(opt, c.Result) {
+				continue
 			}
 
 			for _, annotation := range opt.annotations {
@@ -441,7 +459,7 @@ func podInfoCell(result gcsResult) Cell {
 	case msg == gcs.MissingPodInfo && time.Now().Before(result.deadline()):
 		status = statuspb.TestStatus_RUNNING // Try and reprocess it next time.
 	case msg == gcs.MissingPodInfo:
-		status = statuspb.TestStatus_UNKNOWN // Probably won't receive it.
+		status = statuspb.TestStatus_PASS_WITH_SKIPS // Probably won't receive it.
 	case pass:
 		status = statuspb.TestStatus_PASS
 	default:
@@ -508,8 +526,11 @@ func overallCell(result gcsResult) Cell {
 	return c
 }
 
-// ElapsedKey is the key for the test duration metric.
+// ElapsedKey is the key for the target duration metric.
 const ElapsedKey = "test-duration-minutes"
+
+// TestMethodsElapsedKey is the key for the test results duration metric.
+const TestMethodsElapsedKey = "test-methods-duration-minutes"
 
 // setElapsed inserts the seconds-elapsed metric.
 func setElapsed(metrics map[string]float64, seconds float64) map[string]float64 {

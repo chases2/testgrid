@@ -30,21 +30,19 @@ spec:
       serviceAccountName: updater
       containers:
       - name: updater
-        image: gcr.io/k8s-testgrid/updater:v20220517-v0.0.137-39-gb3934fe7
+        image: gcr.io/k8s-testgrid/updater:v20230707-v0.0.163-27-g43be86eb
         ports:
         - name: metrics
           containerPort: 2112
         args:
-        - --build-concurrency=5
-        - --build-timeout=2m
+        - --build-concurrency=10
+        - --build-timeout=5m
         - --config=gs://k8s-testgrid/config
         - --confirm
         - --group-concurrency=10
         - --group-timeout=20m
         - --json-logs
         - --persist-queue=gs://k8s-testgrid/queue/updater.json
-        - --pooled
-        - --reprocess-on-change
         - --subscribe=kubernetes-jenkins=kubernetes-jenkins/testgrid
         - --subscribe=oss-prow=k8s-testgrid/testgrid
         - --subscribe=istio-prow=k8s-testgrid/testgrid

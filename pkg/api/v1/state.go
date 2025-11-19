@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package v1 (api/v1) is the first versioned implementation of the API
 package v1
 
 import (
@@ -23,66 +22,52 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"net/url"
-	"path"
+
+	"github.com/go-chi/chi"
+	"github.com/golang/protobuf/ptypes/timestamp"
+	"github.com/sirupsen/logrus"
 
 	"github.com/GoogleCloudPlatform/testgrid/config"
 	apipb "github.com/GoogleCloudPlatform/testgrid/pb/api/v1"
-	configpb "github.com/GoogleCloudPlatform/testgrid/pb/config"
 	statepb "github.com/GoogleCloudPlatform/testgrid/pb/state"
 	"github.com/GoogleCloudPlatform/testgrid/pkg/tabulator"
 	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
-	"github.com/golang/protobuf/ptypes/timestamp"
-	"github.com/gorilla/mux"
 )
 
-// findDashboardTab locates dashboard tab in config
-// TODO(fejta): use the raw dashboard and tab name, not its config.Normalize() equivalent.
-func findDashboardTab(cfg *configpb.Configuration, dashboardKey string, tabKey string) (string, *configpb.DashboardTab, error) {
-	if cfg == nil {
-		return "", nil, errors.New("empty config")
+// findDashboardTab locates dashboard tab in config, given a dashboard and tab name.
+func findDashboardTab(cfg *cachedConfig, dashboardInput string, tabInput string) (string, string, string, error) {
+	if cfg == nil || cfg.Config == nil {
+		return "", "", "", errors.New("empty config")
 	}
-	// TODO(fejta): switch to map lookup
-	for _, dashboard := range cfg.Dashboards {
-		if config.Normalize(dashboard.Name) == dashboardKey {
-			for _, tab := range dashboard.DashboardTab {
-				if config.Normalize(tab.Name) == tabKey {
-					return dashboard.Name, tab, nil
-				}
-			}
-			return "", nil, fmt.Errorf("Dashboard {%q} not found", dashboardKey)
+
+	dashboardKey := config.Normalize(dashboardInput)
+	tabKey := config.Normalize(tabInput)
+
+	dashboardName, ok := cfg.NormalDashboard[dashboardKey]
+	if !ok {
+		return "", "", "", fmt.Errorf("Dashboard {%q} not found", dashboardKey)
+	}
+	tabName, ok := cfg.NormalDashboardTab[dashboardKey][tabKey]
+	if !ok {
+		return dashboardName, "", "", fmt.Errorf("Tab {%q} not found", tabKey)
+	}
+
+	for _, tab := range cfg.Config.Dashboards[dashboardName].DashboardTab {
+		if tab.Name == tabName {
+			return dashboardName, tabName, tab.TestGroupName, nil
 		}
 	}
-	return "", nil, fmt.Errorf("Tab {%q} not found", tabKey)
-}
 
-// GroupGrid fetch tab group name grid info (columns, rows, ..etc)
-func (s Server) GroupGrid(ctx context.Context, configPath *gcs.Path, groupName string) (*statepb.Grid, error) {
-	groupPath, err := configPath.ResolveReference(&url.URL{Path: path.Join(s.GridPathPrefix, groupName)})
-	if err != nil {
-		return nil, fmt.Errorf("resolve: %v", err)
-	}
-	grid, _, err := gcs.DownloadGrid(ctx, s.Client, *groupPath)
-	if err != nil {
-		return nil, fmt.Errorf("load: %w", err)
-	}
-	return grid, err
+	return dashboardName, tabName, "", fmt.Errorf("Test group not found")
 }
 
 // Grid fetch tab and grid info (columns, rows, ..etc)
-func (s Server) Grid(ctx context.Context, scope string, cfg *configpb.Configuration, dashboardKey string, tabKey string) (*statepb.Grid, error) {
-	dash, tab, err := findDashboardTab(cfg, dashboardKey, tabKey)
-	if err != nil {
-		return nil, err
-	}
+func (s Server) Grid(ctx context.Context, scope string, dashboardName, tabName, testGroupNanme string) (*statepb.Grid, error) {
 	configPath, _, err := s.configPath(scope)
 	if err != nil {
 		return nil, err
 	}
-	if s.TabPathPrefix == "" {
-		return s.GroupGrid(ctx, configPath, tab.TestGroupName)
-	}
-	path, err := tabulator.TabStatePath(*configPath, s.TabPathPrefix, dash, tab.Name)
+	path, err := tabulator.TabStatePath(*configPath, s.TabPathPrefix, dashboardName, tabName)
 	if err != nil {
 		return nil, fmt.Errorf("tab state path: %v", err)
 	}
@@ -91,7 +76,8 @@ func (s Server) Grid(ctx context.Context, scope string, cfg *configpb.Configurat
 }
 
 // decodeRLE decodes the run length encoded data
-//   [0, 3, 5, 4] -> [0, 0, 0, 5, 5, 5, 5]
+//
+//	[0, 3, 5, 4] -> [0, 0, 0, 5, 5, 5, 5]
 func decodeRLE(encodedData []int32) []int32 {
 	var decodedResult []int32
 	encodedDataLength := len(encodedData)
@@ -110,15 +96,21 @@ func (s *Server) ListHeaders(ctx context.Context, req *apipb.ListHeadersRequest)
 	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
 	defer cancel()
 
-	cfg, err := s.getConfig(ctx, req.GetScope())
+	cfg, err := s.getConfig(ctx, logrus.WithContext(ctx), req.GetScope())
+	if err != nil {
+		return nil, err
+	}
+	cfg.Mutex.RLock()
+	defer cfg.Mutex.RUnlock()
+
+	dashboardName, tabName, testGroupName, err := findDashboardTab(cfg, req.GetDashboard(), req.GetTab())
 	if err != nil {
 		return nil, err
 	}
 
-	dashboardKey, tabKey := req.GetDashboard(), req.GetTab()
-	grid, err := s.Grid(ctx, req.GetScope(), cfg, dashboardKey, tabKey)
+	grid, err := s.Grid(ctx, req.GetScope(), dashboardName, tabName, testGroupName)
 	if err != nil {
-		return nil, fmt.Errorf("Dashboard {%q} or tab {%q} not found", dashboardKey, tabKey)
+		return nil, fmt.Errorf("Dashboard {%q} or tab {%q} not found", req.GetDashboard(), req.GetTab())
 	}
 	if grid == nil {
 		return nil, errors.New("grid not found")
@@ -148,11 +140,10 @@ func (s *Server) ListHeaders(ctx context.Context, req *apipb.ListHeadersRequest)
 // ListHeadersHTTP returns dashboard tab headers
 // Response json: ListHeadersResponse
 func (s Server) ListHeadersHTTP(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
 	req := apipb.ListHeadersRequest{
 		Scope:     r.URL.Query().Get(scopeParam),
-		Dashboard: vars["dashboard"],
-		Tab:       vars["tab"],
+		Dashboard: chi.URLParam(r, "dashboard"),
+		Tab:       chi.URLParam(r, "tab"),
 	}
 	resp, err := s.ListHeaders(r.Context(), &req)
 	if err != nil {
@@ -160,7 +151,7 @@ func (s Server) ListHeadersHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, &resp)
+	s.writeJSON(w, resp)
 }
 
 // ListRows returns dashboard tab rows
@@ -169,15 +160,21 @@ func (s *Server) ListRows(ctx context.Context, req *apipb.ListRowsRequest) (*api
 	defer cancel()
 
 	// this should be factored out of this function
-	cfg, err := s.getConfig(ctx, req.GetScope())
+	cfg, err := s.getConfig(ctx, logrus.WithContext(ctx), req.GetScope())
+	if err != nil {
+		return nil, err
+	}
+	cfg.Mutex.RLock()
+	defer cfg.Mutex.RUnlock()
+
+	dashboardName, tabName, testGroupName, err := findDashboardTab(cfg, req.GetDashboard(), req.GetTab())
 	if err != nil {
 		return nil, err
 	}
 
-	dashboardKey, tabKey := req.GetDashboard(), req.GetTab()
-	grid, err := s.Grid(ctx, req.GetScope(), cfg, dashboardKey, tabKey)
+	grid, err := s.Grid(ctx, req.GetScope(), dashboardName, tabName, testGroupName)
 	if err != nil {
-		return nil, fmt.Errorf("Dashboard {%q} or tab {%q} not found", dashboardKey, tabKey)
+		return nil, fmt.Errorf("Dashboard {%q} or tab {%q} not found", req.GetDashboard(), req.GetTab())
 	}
 	if grid == nil {
 		return nil, errors.New("grid not found")
@@ -187,21 +184,33 @@ func (s *Server) ListRows(ctx context.Context, req *apipb.ListRowsRequest) (*api
 		Rows: make([]*apipb.ListRowsResponse_Row, 0, len(grid.Rows)),
 	}
 	for _, gRow := range grid.Rows {
-		cellsCount := len(gRow.CellIds)
+		gRowDecodedResults := decodeRLE(gRow.Results)
+		cellsCount := len(gRowDecodedResults)
 		row := apipb.ListRowsResponse_Row{
 			Name:   gRow.Name,
 			Issues: gRow.Issues,
 			Alert:  gRow.AlertInfo,
 			Cells:  make([]*apipb.ListRowsResponse_Cell, 0, cellsCount),
 		}
-		gRowDecodedResults := decodeRLE(gRow.Results)
+		var filledIdx int
 		// loop through CellIds, Messages, Icons slices and build cell struct objects
 		for cellIdx := 0; cellIdx < cellsCount; cellIdx++ {
+			// Cell IDs, messages, and icons are only listed for non-blank cells.
 			cell := apipb.ListRowsResponse_Cell{
-				Result:  gRowDecodedResults[cellIdx],
-				CellId:  gRow.CellIds[cellIdx],
-				Message: gRow.Messages[cellIdx],
-				Icon:    gRow.Icons[cellIdx],
+				Result: gRowDecodedResults[cellIdx],
+			}
+			if gRowDecodedResults[cellIdx] != 0 {
+				// Cell IDs may be omitted for subrows.
+				if len(gRow.CellIds) != 0 {
+					cell.CellId = gRow.CellIds[filledIdx]
+				}
+				if len(gRow.Messages) != 0 {
+					cell.Message = gRow.Messages[filledIdx]
+				}
+				if len(gRow.Icons) != 0 {
+					cell.Icon = gRow.Icons[filledIdx]
+				}
+				filledIdx++
 			}
 			row.Cells = append(row.Cells, &cell)
 		}
@@ -213,11 +222,10 @@ func (s *Server) ListRows(ctx context.Context, req *apipb.ListRowsRequest) (*api
 // ListRowsHTTP returns dashboard tab rows
 // Response json: ListRowsResponse
 func (s Server) ListRowsHTTP(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
 	req := apipb.ListRowsRequest{
 		Scope:     r.URL.Query().Get(scopeParam),
-		Dashboard: vars["dashboard"],
-		Tab:       vars["tab"],
+		Dashboard: chi.URLParam(r, "dashboard"),
+		Tab:       chi.URLParam(r, "tab"),
 	}
 	resp, err := s.ListRows(r.Context(), &req)
 	if err != nil {
@@ -225,5 +233,5 @@ func (s Server) ListRowsHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, &resp)
+	s.writeJSON(w, resp)
 }

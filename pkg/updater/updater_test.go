@@ -18,11 +18,9 @@ package updater
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"reflect"
 	"sort"
@@ -59,15 +57,23 @@ type fakeOpener = fake.Opener
 func TestGCS(t *testing.T) {
 	cases := []struct {
 		name  string
+		ctx   context.Context
 		group *configpb.TestGroup
 		fail  bool
 	}{
 		{
+			name:  "contextless",
+			group: &configpb.TestGroup{},
+			fail:  true,
+		},
+		{
 			name:  "basic",
+			ctx:   context.Background(),
 			group: &configpb.TestGroup{},
 		},
 		{
 			name: "kubernetes", // should fail
+			ctx:  context.Background(),
 			group: &configpb.TestGroup{
 				UseKubernetesClient: true,
 			},
@@ -82,7 +88,6 @@ func TestGCS(t *testing.T) {
 			// either because the context is canceled or things like client are unset)
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			updater := GCS(nil, nil, 0, 0, 0, false, SortStarted, false)
 			defer func() {
 				if r := recover(); r != nil {
 					if !tc.fail {
@@ -90,6 +95,7 @@ func TestGCS(t *testing.T) {
 					}
 				}
 			}()
+			updater := GCS(tc.ctx, nil, 0, 0, 0, false, false)
 			_, err := updater(ctx, logrus.WithField("case", tc.name), nil, tc.group, gcs.Path{})
 			switch {
 			case err != nil:
@@ -383,13 +389,15 @@ func TestUpdate(t *testing.T) {
 					Uploader: fakeUploader{},
 					Client: fakeClient{
 						Lister: fakeLister{},
-						Opener: fakeOpener{},
+						Opener: fakeOpener{
+							Paths: map[gcs.Path]fake.Object{},
+						},
 					},
 				},
 				Lock: &sync.RWMutex{},
 			}
 
-			client.Opener[configPath] = fakeObject{
+			client.Opener.Paths[configPath] = fakeObject{
 				Data: func() string {
 					b, err := config.MarshalBytes(tc.config)
 					if err != nil {
@@ -417,19 +425,24 @@ func TestUpdate(t *testing.T) {
 			}
 
 			if tc.groupUpdater == nil {
-				tc.groupUpdater = GCS(nil, client, *tc.groupTimeout, *tc.buildTimeout, tc.buildConcurrency, !tc.skipConfirm, SortStarted, false)
+				poolCtx, poolCancel := context.WithCancel(context.Background())
+				defer poolCancel()
+				tc.groupUpdater = GCS(poolCtx, client, *tc.groupTimeout, *tc.buildTimeout, tc.buildConcurrency, !tc.skipConfirm, false)
+			}
+			opts := &UpdateOptions{
+				ConfigPath:       configPath,
+				GridPrefix:       tc.gridPrefix,
+				GroupConcurrency: tc.groupConcurrency,
+				GroupNames:       tc.groupNames,
+				Write:            !tc.skipConfirm,
+				Freq:             tc.freq,
 			}
 			err := Update(
 				ctx,
 				client,
-				nil, // metric
-				configPath,
-				tc.gridPrefix,
-				tc.groupConcurrency,
-				tc.groupNames,
+				nil, // metric,
 				tc.groupUpdater,
-				!tc.skipConfirm,
-				tc.freq,
+				opts,
 			)
 			switch {
 			case err != nil:
@@ -1097,22 +1110,19 @@ func TestInflateDropAppend(t *testing.T) {
 		}
 	}
 	cases := []struct {
-		name              string
-		ctx               context.Context
-		builds            []fakeBuild
-		group             *configpb.TestGroup
-		concurrency       int
-		skipWrite         bool
-		colReader         func(builds []fakeBuild) ColumnReader
-		colSorter         ColumnSorter
-		reprocess         time.Duration
-		reprocessOnChange bool
-		groupTimeout      *time.Duration
-		buildTimeout      *time.Duration
-		current           *fake.Object
-		byteCeiling       int
-		expected          *fakeUpload
-		err               bool
+		name         string
+		ctx          context.Context
+		builds       []fakeBuild
+		group        *configpb.TestGroup
+		concurrency  int
+		skipWrite    bool
+		colReader    func(builds []fakeBuild) ColumnReader
+		reprocess    time.Duration
+		groupTimeout *time.Duration
+		buildTimeout *time.Duration
+		current      *fake.Object
+		expected     *fakeUpload
+		err          bool
 	}{
 		{
 			name: "basically works",
@@ -1262,169 +1272,6 @@ func TestInflateDropAppend(t *testing.T) {
 			},
 		},
 		{
-			name: "sort ascending",
-			group: &configpb.TestGroup{
-				GcsPrefix: "bucket/path/to/build/",
-				ColumnHeader: []*configpb.TestGroup_ColumnHeader{
-					{
-						ConfigurationValue: "Commit",
-					},
-				},
-			},
-			colSorter: func(tg *configpb.TestGroup, cols []InflatedColumn) {
-				want := configpb.TestGroup{ // same as tc.group
-					GcsPrefix: "bucket/path/to/build/",
-					ColumnHeader: []*configpb.TestGroup_ColumnHeader{
-						{
-							ConfigurationValue: "Commit",
-						},
-					},
-				}
-				if diff := cmp.Diff(&want, tg, protocmp.Transform()); diff != "" {
-					panic(fmt.Sprintf("bad TestGroup:\n%s", diff))
-				}
-				sort.SliceStable(cols, func(i, j int) bool {
-					return cols[i].Column.Started < cols[j].Column.Started
-				})
-			},
-			builds: []fakeBuild{
-				{
-					id:      "99",
-					started: jsonStarted(now + 99),
-				},
-				{
-					id:      "80",
-					started: jsonStarted(now + 80),
-					podInfo: podInfoSuccess,
-					finished: jsonFinished(now+81, true, metadata.Metadata{
-						metadata.JobVersion: "build80",
-					}),
-					passed: []string{"good1", "good2", "flaky"},
-				},
-				{
-					id:      "50",
-					started: jsonStarted(now + 50),
-					podInfo: podInfoSuccess,
-					finished: jsonFinished(now+51, false, metadata.Metadata{
-						metadata.JobVersion: "build50",
-					}),
-					passed: []string{"good1", "good2"},
-					failed: []string{"flaky"},
-				},
-				{
-					id:      "10",
-					started: jsonStarted(now + 10),
-					podInfo: podInfoSuccess,
-					finished: jsonFinished(now+11, true, metadata.Metadata{
-						metadata.JobVersion: "build10",
-					}),
-					passed: []string{"good1", "good2", "flaky"},
-				},
-			},
-			expected: &fakeUpload{
-				Buf: mustGrid(&statepb.Grid{
-					Columns: []*statepb.Column{
-						{
-							Build:   "10",
-							Hint:    "10",
-							Started: float64(now+10) * 1000,
-							Extra:   []string{"build10"},
-						},
-						{
-							Build:   "50",
-							Hint:    "50",
-							Started: float64(now+50) * 1000,
-							Extra:   []string{"build50"},
-						},
-						{
-							Build:   "80",
-							Hint:    "80",
-							Started: float64(now+80) * 1000,
-							Extra:   []string{"build80"},
-						},
-						{
-							Build:   "99",
-							Hint:    "99",
-							Started: float64(now+99) * 1000,
-							Extra:   []string{""},
-						},
-					},
-					Rows: []*statepb.Row{
-						setupRow(
-							&statepb.Row{
-								Name: "build." + overallRow,
-								Id:   "build." + overallRow,
-							},
-							cell{
-								Result:  statuspb.TestStatus_PASS,
-								Metrics: setElapsed(nil, 1),
-							},
-							cell{
-								Result:  statuspb.TestStatus_FAIL,
-								Metrics: setElapsed(nil, 1),
-							},
-							cell{
-								Result:  statuspb.TestStatus_PASS,
-								Metrics: setElapsed(nil, 1),
-							},
-							cell{
-								Result:  statuspb.TestStatus_RUNNING,
-								Message: "Build still running...",
-								Icon:    "R",
-							},
-						),
-						setupRow(
-							&statepb.Row{
-								Name: "build." + podInfoRow,
-								Id:   "build." + podInfoRow,
-							},
-							podInfoPassCell,
-							podInfoPassCell,
-							podInfoPassCell,
-							cell{Result: statuspb.TestStatus_NO_RESULT},
-						),
-						setupRow(
-							&statepb.Row{
-								Name: "flaky",
-								Id:   "flaky",
-							},
-							cell{Result: statuspb.TestStatus_PASS},
-							cell{
-								Result:  statuspb.TestStatus_FAIL,
-								Message: "flaky",
-								Icon:    "F",
-							},
-							cell{Result: statuspb.TestStatus_PASS},
-							cell{Result: statuspb.TestStatus_NO_RESULT},
-						),
-						setupRow(
-							&statepb.Row{
-								Name: "good1",
-								Id:   "good1",
-							},
-							cell{Result: statuspb.TestStatus_PASS},
-							cell{Result: statuspb.TestStatus_PASS},
-							cell{Result: statuspb.TestStatus_PASS},
-							cell{Result: statuspb.TestStatus_NO_RESULT},
-						),
-						setupRow(
-							&statepb.Row{
-								Name: "good2",
-								Id:   "good2",
-							},
-							cell{Result: statuspb.TestStatus_PASS},
-							cell{Result: statuspb.TestStatus_PASS},
-							cell{Result: statuspb.TestStatus_PASS},
-							cell{Result: statuspb.TestStatus_NO_RESULT},
-						),
-					},
-				}),
-				CacheControl: "no-cache",
-				WorldRead:    gcs.DefaultACL,
-				Generation:   1,
-			},
-		},
-		{
 			name:      "do not write when requested",
 			skipWrite: true,
 			group: &configpb.TestGroup{
@@ -1562,134 +1409,6 @@ func TestInflateDropAppend(t *testing.T) {
 								Result:  statuspb.TestStatus_FLAKY,
 								Message: "keep me",
 								Icon:    "yes stay",
-							},
-						),
-					},
-				}),
-				CacheControl: "no-cache",
-				WorldRead:    gcs.DefaultACL,
-				Generation:   1,
-			},
-		},
-		{
-			name: "only shrink",
-			group: &configpb.TestGroup{
-				GcsPrefix: "bucket/path/to/build/",
-				ColumnHeader: []*configpb.TestGroup_ColumnHeader{
-					{
-						ConfigurationValue: "Commit",
-					},
-				},
-			},
-			reprocess:   time.Nanosecond,
-			byteCeiling: 1,
-			builds: []fakeBuild{
-				{
-					id:      "bad",
-					started: jsonStarted(now),
-				},
-			},
-			current: &fake.Object{
-				Attrs: &storage.ReaderObjectAttrs{
-					Size: 100000000,
-				},
-				Data: string(mustGrid(&statepb.Grid{
-					Columns: []*statepb.Column{
-						{
-							Build:   "a",
-							Hint:    "10",
-							Started: float64(now * 1000),
-							Extra:   []string{""},
-						},
-						{
-							Build:   "b",
-							Hint:    "5",
-							Started: float64(now-5) * 1000,
-							Extra:   []string{""},
-						},
-						{
-							Build:   "c",
-							Hint:    "3",
-							Started: float64(now-7) * 1000,
-							Extra:   []string{""},
-						},
-						{
-							Build:   "d",
-							Hint:    "2",
-							Started: float64(now-8) * 1000,
-							Extra:   []string{""},
-						},
-					},
-					Rows: []*statepb.Row{
-						setupRow(
-							&statepb.Row{
-								Name: "build." + overallRow,
-								Id:   "build." + overallRow,
-							},
-							cell{
-								Result:  statuspb.TestStatus_PASS,
-								Message: "a",
-								Icon:    "a",
-							},
-							cell{
-								Result:  statuspb.TestStatus_FAIL,
-								Message: "b",
-								Icon:    "b",
-							},
-							cell{
-								Result:  statuspb.TestStatus_FAIL,
-								Message: "c",
-								Icon:    "c",
-							},
-							cell{
-								Result:  statuspb.TestStatus_FAIL,
-								Message: "d",
-								Icon:    "d",
-							},
-						),
-					},
-				})),
-			},
-			expected: &fakeUpload{
-				Buf: mustGrid(&statepb.Grid{
-					Columns: []*statepb.Column{
-						{
-							Hint:    "10",
-							Started: float64(now-8) * 1000,
-							Extra:   []string{""},
-						},
-					},
-					Rows: []*statepb.Row{
-						setupRow(
-							&statepb.Row{
-								Name: "Truncated",
-								Id:   "Truncated",
-							},
-							cell{
-								Result:  statuspb.TestStatus_UNKNOWN,
-								Message: "4 cell grid exceeds maximum size of 1 cells, removed 2 rows",
-							},
-						),
-						setupRow(
-							&statepb.Row{
-								Name: "build." + overallRow,
-								Id:   "build." + overallRow,
-							},
-							cell{
-								Result:  statuspb.TestStatus_PASS,
-								Message: "a",
-								Icon:    "a",
-							},
-						),
-						setupRow(
-							&statepb.Row{
-								Name: "build." + overallRow + " [1]",
-								Id:   "build." + overallRow,
-							},
-							cell{
-								Result:  statuspb.TestStatus_FAIL,
-								Message: "b",
-								Icon:    "b",
 							},
 						),
 					},
@@ -1847,8 +1566,7 @@ func TestInflateDropAppend(t *testing.T) {
 				},
 				DaysOfResults: 30,
 			},
-			reprocess:         10 * time.Second,
-			reprocessOnChange: true,
+			reprocess: 10 * time.Second,
 			builds: []fakeBuild{
 				{
 					id:      "current",
@@ -2296,24 +2014,10 @@ func TestInflateDropAppend(t *testing.T) {
 			ctx, cancel := context.WithCancel(tc.ctx)
 			defer cancel()
 
-			if tc.byteCeiling != 0 {
-				defer func(orig int) {
-					byteCeiling = orig
-				}(byteCeiling)
-				defer func(orig int) {
-					cellCeiling = orig
-				}(cellCeiling)
-				byteCeiling = tc.byteCeiling
-				cellCeiling = tc.byteCeiling
-
-			}
-
-			var readResult *resultReader
 			if tc.concurrency == 0 {
-				readResult = basicResultReader()
-			} else {
-				readResult = resultReaderPool(ctx, logrus.WithField("name", tc.name), tc.concurrency)
+				tc.concurrency = 1
 			}
+			readResult := resultReaderPool(ctx, logrus.WithField("name", tc.name), tc.concurrency)
 			if tc.groupTimeout == nil {
 				tc.groupTimeout = &defaultTimeout
 			}
@@ -2326,13 +2030,15 @@ func TestInflateDropAppend(t *testing.T) {
 					Uploader: fakeUploader{},
 					Client: fakeClient{
 						Lister: fakeLister{},
-						Opener: fakeOpener{},
+						Opener: fakeOpener{
+							Paths: map[gcs.Path]fake.Object{},
+						},
 					},
 				},
 			}
 
 			if tc.current != nil {
-				client.Opener[uploadPath] = *tc.current
+				client.Opener.Paths[uploadPath] = *tc.current
 			}
 
 			buildsPath := newPathOrDie("gs://" + tc.group.GcsPrefix)
@@ -2344,12 +2050,9 @@ func TestInflateDropAppend(t *testing.T) {
 			}
 			client.Lister[buildsPath] = fi
 
-			colReader := gcsColumnReader(client, *tc.buildTimeout, readResult)
+			colReader := gcsColumnReader(client, *tc.buildTimeout, readResult, false)
 			if tc.colReader != nil {
 				colReader = tc.colReader(tc.builds)
-			}
-			if tc.colSorter == nil {
-				tc.colSorter = SortStarted
 			}
 			_, err := InflateDropAppend(
 				ctx,
@@ -2359,17 +2062,15 @@ func TestInflateDropAppend(t *testing.T) {
 				uploadPath,
 				!tc.skipWrite,
 				colReader,
-				tc.colSorter,
 				tc.reprocess,
-				tc.reprocessOnChange,
 			)
 			switch {
 			case err != nil:
 				if !tc.err {
-					t.Errorf("updateGroup() got unexpected error: %v", err)
+					t.Errorf("InflateDropAppend() got unexpected error: %v", err)
 				}
 			case tc.err:
-				t.Error("updateGroup() failed to receive an exception")
+				t.Error("InflateDropAppend() failed to receive an error")
 			default:
 				expected := fakeUploader{}
 				if tc.expected != nil {
@@ -2380,15 +2081,17 @@ func TestInflateDropAppend(t *testing.T) {
 				if diff == "" {
 					return
 				}
-				t.Errorf("updateGroup() got unexpected diff (-want +got):\n%s", diff)
+				t.Logf("InflateDropAppend() generated a binary diff (-want +got):\n%s", diff)
 				fakeDownloader := fakeOpener{
-					uploadPath: {Data: string(actual[uploadPath].Buf)},
+					Paths: map[gcs.Path]fake.Object{
+						uploadPath: {Data: string(actual[uploadPath].Buf)},
+					},
 				}
 				actualGrid, _, err := gcs.DownloadGrid(ctx, fakeDownloader, uploadPath)
 				if err != nil {
 					t.Errorf("actual gcs.DownloadGrid() got unexpected error: %v", err)
 				}
-				fakeDownloader[uploadPath] = fakeObject{Data: string(tc.expected.Buf)}
+				fakeDownloader.Paths[uploadPath] = fakeObject{Data: string(tc.expected.Buf)}
 				expectedGrid, _, err := gcs.DownloadGrid(ctx, fakeDownloader, uploadPath)
 				if err != nil {
 					t.Errorf("expected gcs.DownloadGrid() got unexpected error: %v", err)
@@ -2452,7 +2155,7 @@ func TestFormatStrftime(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := formatStrftime(tc.name); got != tc.want {
+			if got := FormatStrftime(tc.name); got != tc.want {
 				t.Errorf("formatStrftime(%q) got %q want %q", tc.name, got, tc.want)
 			}
 		})
@@ -2517,18 +2220,9 @@ func TestTruncateGrid(t *testing.T) {
 				addRows(1000, nil),
 				addRows(1000, nil),
 			),
-			want: append(
-				addCols(
-					addRows(1000, nil),
-					addRows(1000, nil),
-					truncatedCells(5000, 0, 3000, "cell"),
-				),
-				InflatedColumn{
-					Column: &statepb.Column{},
-				},
-				InflatedColumn{
-					Column: &statepb.Column{},
-				},
+			want: addCols(
+				addRows(1000, nil),
+				addRows(1000, nil),
 			),
 		},
 		{
@@ -2546,15 +2240,14 @@ func TestTruncateGrid(t *testing.T) {
 				addRows(1000, nil),
 				addRows(1000, nil),
 				addRows(1, nil),
-				truncatedCells(4001, 3001, 1000, "cell"),
 			),
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			truncateGrid(tc.cols, tc.ceiling)
-			if diff := cmp.Diff(tc.want, tc.cols, protocmp.Transform()); diff != "" {
+			got := truncateGrid(tc.cols, tc.ceiling)
+			if diff := cmp.Diff(tc.want, got, protocmp.Transform()); diff != "" {
 				t.Errorf("truncateGrid() got unexpected diff (-want +got):\n%s", diff)
 			}
 		})
@@ -2613,14 +2306,7 @@ func TestReprocessColumn(t *testing.T) {
 	}
 }
 
-func TestShrinkGrid(t *testing.T) {
-	random := func(i int) string {
-		b := make([]byte, i)
-		if _, err := rand.Read(b); err != nil {
-			t.Fatalf("rand.Read(%d): %v", i, err)
-		}
-		return base64.StdEncoding.EncodeToString(b)
-	}
+func Test_ShrinkGridInline(t *testing.T) {
 	cases := []struct {
 		name    string
 		ctx     context.Context
@@ -2677,164 +2363,7 @@ func TestShrinkGrid(t *testing.T) {
 			},
 		},
 		{
-			name: "truncate only metrics, properties, messages",
-			tg:   &configpb.TestGroup{},
-			cols: []InflatedColumn{
-				{
-					Column: &statepb.Column{
-						Name:  "hi",
-						Build: "there",
-					},
-					Cells: map[string]Cell{
-						"cell": {
-							Result:  statuspb.TestStatus_FAIL,
-							Message: "yo",
-						},
-					},
-				},
-				{
-					Column: &statepb.Column{
-						Name:  "two-name",
-						Build: "two-build",
-					},
-					Cells: func() map[string]Cell {
-						cells := map[string]Cell{}
-
-						for i := 0; i < 10; i++ {
-							cells[fmt.Sprintf("cell-%d", i)] = Cell{
-								Result:  statuspb.TestStatus_FAIL,
-								Message: random(10000),
-								Metrics: map[string]float64{
-									random(4096): 7,
-								},
-								Properties: map[string]string{
-									"junk": random(100000),
-								},
-							}
-						}
-						return cells
-					}(),
-				},
-			},
-			ceiling: 200000,
-			want: func(tg *configpb.TestGroup, origCols []InflatedColumn, issues map[string][]string) *statepb.Grid {
-				logger := logrus.New()
-				grid := constructGridFromGroupConfig(logger, tg, origCols, issues)
-				buf, _ := gcs.MarshalGrid(grid)
-				orig := len(buf)
-				cols := []InflatedColumn{
-					{
-						Column: &statepb.Column{
-							Name:  "hi",
-							Build: "there",
-						},
-						Cells: map[string]Cell{
-							"cell": {
-								Result:  statuspb.TestStatus_FAIL,
-								Message: "yo",
-							},
-						},
-					},
-					{
-						Column: &statepb.Column{
-							Name:  "two-name",
-							Build: "two-build",
-						},
-						Cells: func() map[string]Cell {
-							cells := map[string]Cell{}
-
-							for i := 0; i < 10; i++ {
-								cells[fmt.Sprintf("cell-%d", i)] = Cell{
-									Result:  statuspb.TestStatus_FAIL,
-									Message: "foo",
-								}
-							}
-							stripCells(cells, orig, 100000)
-							return cells
-						}(),
-					},
-				}
-				return constructGridFromGroupConfig(logger, tg, cols, issues)
-			},
-		},
-		{
-			name: "truncate row data",
-			tg:   &configpb.TestGroup{},
-			cols: []InflatedColumn{
-				{
-					Column: &statepb.Column{
-						Name:  "hi",
-						Build: "there",
-					},
-					Cells: map[string]Cell{
-						"cell": {
-							Result:  statuspb.TestStatus_FAIL,
-							Message: "yo",
-						},
-					},
-				},
-				{
-					Column: &statepb.Column{
-						Name:  "two-name",
-						Build: "two-build",
-					},
-					Cells: func() map[string]Cell {
-						cells := map[string]Cell{}
-
-						for i := 0; i < 1000; i++ {
-							cells[fmt.Sprintf("cell-%d", i)] = Cell{
-								Result:  statuspb.TestStatus_FAIL,
-								Message: "yo",
-							}
-						}
-						return cells
-					}(),
-				},
-			},
-			ceiling: 2000,
-			want: func(tg *configpb.TestGroup, _ []InflatedColumn, issues map[string][]string) *statepb.Grid {
-				cols := []InflatedColumn{
-					{
-						Column: &statepb.Column{
-							Name:  "hi",
-							Build: "there",
-						},
-						Cells: map[string]Cell{
-							"cell": {
-								Result:  statuspb.TestStatus_FAIL,
-								Message: "yo",
-							},
-						},
-					},
-					{
-						Column: &statepb.Column{
-							Name:  "two-name",
-							Build: "two-build",
-						},
-						Cells: func() map[string]Cell {
-							cells := map[string]Cell{}
-
-							for i := 0; i < 1000; i++ {
-								cells[fmt.Sprintf("cell-%d", i)] = Cell{
-									Result:  statuspb.TestStatus_FAIL,
-									Message: "yo",
-								}
-							}
-							return cells
-						}(),
-					},
-				}
-				logger := logrus.New()
-				grid := constructGridFromGroupConfig(logger, tg, cols, issues)
-				buf, _ := gcs.MarshalGrid(grid)
-				orig := len(buf)
-				cols[1].Cells = truncatedCells(orig, 1000, len(cols[1].Cells), "byte")
-
-				return constructGridFromGroupConfig(logger, tg, cols, issues)
-			},
-		},
-		{
-			name: "truncate col and row data",
+			name: "truncate column data",
 			tg:   &configpb.TestGroup{},
 			cols: []InflatedColumn{
 				{
@@ -2880,41 +2409,12 @@ func TestShrinkGrid(t *testing.T) {
 				},
 			},
 			ceiling: 200,
-			want: func(tg *configpb.TestGroup, _ []InflatedColumn, issues map[string][]string) *statepb.Grid {
-				cols := []InflatedColumn{
+			want: func(tg *configpb.TestGroup, cols []InflatedColumn, issues map[string][]string) *statepb.Grid {
+				expect := []InflatedColumn{
 					{
 						Column: &statepb.Column{
 							Name:  "hi",
 							Build: "there",
-						},
-						Cells: map[string]Cell{
-							"cell": {
-								Result:  statuspb.TestStatus_FAIL,
-								Message: "yo",
-							},
-						},
-					},
-					{
-						Column: &statepb.Column{
-							Name:  "two-name",
-							Build: "two-build",
-						},
-						Cells: func() map[string]Cell {
-							cells := map[string]Cell{}
-
-							for i := 0; i < 1000; i++ {
-								cells[fmt.Sprintf("cell-%d", i)] = Cell{
-									Result:  statuspb.TestStatus_FAIL,
-									Message: "yo",
-								}
-							}
-							return cells
-						}(),
-					},
-					{
-						Column: &statepb.Column{
-							Name:  "three-name",
-							Build: "three-build",
 						},
 						Cells: map[string]Cell{
 							"cell": {
@@ -2928,15 +2428,127 @@ func TestShrinkGrid(t *testing.T) {
 				grid := constructGridFromGroupConfig(logger, tg, cols, issues)
 				buf, _ := gcs.MarshalGrid(grid)
 				orig := len(buf)
-				// Shrink row data for second column
-				cols[1].Cells = truncatedCells(orig, 100, len(cols[1].Cells), "byte")
 
-				// Merge column 3 into column 2
-				cols[1].Column = &statepb.Column{}
-				cols[1].Cells["cell"] = cols[2].Cells["cell"]
-				cols = cols[:2]
+				truncateLastColumn(expect, orig, 200, "byte")
 
-				return constructGridFromGroupConfig(logger, tg, cols, issues)
+				return constructGridFromGroupConfig(logger, tg, expect, issues)
+			},
+		},
+		{
+			name: "truncate sparse column data",
+			tg:   &configpb.TestGroup{},
+			cols: []InflatedColumn{
+				{
+					Column: &statepb.Column{
+						Name:  "one",
+						Build: "one",
+					},
+					Cells: map[string]Cell{
+						"row-0": {
+							Result: statuspb.TestStatus_FAIL,
+						},
+						"row-1": {
+							Result: statuspb.TestStatus_NO_RESULT,
+						},
+						"row-2": {
+							Result: statuspb.TestStatus_NO_RESULT,
+						},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:  "two",
+						Build: "two",
+					},
+					Cells: func() map[string]Cell {
+						cells := map[string]Cell{}
+
+						for i := 0; i < 100; i++ {
+							cells[fmt.Sprintf("row-%d", i)] = Cell{
+								Result: statuspb.TestStatus_FAIL,
+							}
+						}
+						return cells
+					}(),
+				},
+				{
+					Column: &statepb.Column{
+						Name:  "three",
+						Build: "three",
+					},
+					Cells: map[string]Cell{
+						"row-0": {
+							Result: statuspb.TestStatus_FAIL,
+						},
+						"row-1": {
+							Result: statuspb.TestStatus_FAIL,
+						},
+						"row-2": {
+							Result: statuspb.TestStatus_FAIL,
+						},
+					},
+				},
+			},
+			ceiling: 200,
+			want: func(tg *configpb.TestGroup, cols []InflatedColumn, issues map[string][]string) *statepb.Grid {
+				expect := []InflatedColumn{
+					// Drop the rows that are empty after trimming (e.g. row-1 and row-2).
+					{
+						Column: &statepb.Column{
+							Name:  "one",
+							Build: "one",
+						},
+						Cells: map[string]Cell{
+							"row-0": {
+								Result: statuspb.TestStatus_FAIL,
+							},
+						},
+					},
+				}
+				logger := logrus.New()
+				grid := constructGridFromGroupConfig(logger, tg, cols, issues)
+				buf, _ := gcs.MarshalGrid(grid)
+				orig := len(buf)
+
+				truncateLastColumn(expect, orig, 200, "byte")
+
+				return constructGridFromGroupConfig(logger, tg, expect, issues)
+			},
+		},
+		{
+			name: "delete most column data",
+			tg:   &configpb.TestGroup{},
+			cols: []InflatedColumn{
+				{
+					Column: &statepb.Column{
+						Name:  "hi",
+						Build: "there",
+					},
+					Cells: map[string]Cell{
+						"cell": {
+							Result:  statuspb.TestStatus_FAIL,
+							Message: "yo",
+						},
+					},
+				},
+			},
+			ceiling: 1, // Too small for even one cell
+			want: func(tg *configpb.TestGroup, cols []InflatedColumn, issues map[string][]string) *statepb.Grid {
+				expect := []InflatedColumn{
+					{
+						Column: &statepb.Column{
+							Name:  "hi",
+							Build: "there",
+						},
+						Cells: map[string]Cell{
+							"Truncated": {
+								Result:  statuspb.TestStatus_UNKNOWN,
+								Message: "The grid is too large to update. Split this testgroup into multiple testgroups.",
+							},
+						},
+					},
+				}
+				return constructGridFromGroupConfig(logrus.New(), tg, expect, nil)
 			},
 		},
 		{
@@ -3055,21 +2667,18 @@ func TestShrinkGrid(t *testing.T) {
 			if tc.ctx == nil {
 				tc.ctx = context.Background()
 			}
-			var want *statepb.Grid
-			if tc.want != nil {
-				want = tc.want(tc.tg, tc.cols, tc.issues)
-			}
-			got, buf, err := shrinkGrid(tc.ctx, logrus.WithField("name", tc.name), tc.tg, tc.cols, tc.issues, tc.ceiling)
+			want := tc.want(tc.tg, tc.cols, tc.issues)
+			got, buf, err := shrinkGridInline(tc.ctx, logrus.WithField("name", tc.name), tc.tg, tc.cols, tc.issues, tc.ceiling)
 			switch {
 			case err != nil:
 				if !tc.err {
-					t.Errorf("shrinkGrid() got unexpected error: %v", err)
+					t.Errorf("unexpected error: %v", err)
 				}
 			case tc.err:
-				t.Errorf("shrinkGrid() failed to get an error, got %v", got)
+				t.Errorf("failed to get an error, got %v", got)
 			default:
 				if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
-					t.Errorf("shrinkGrid() got unexpected grid diff (-want +got):\n%s", diff)
+					t.Errorf("unexpected grid diff (-want +got):\n%s", diff)
 					return
 				}
 				wantBuf, err := gcs.MarshalGrid(want)
@@ -3077,7 +2686,7 @@ func TestShrinkGrid(t *testing.T) {
 					t.Fatalf("Failed to marshal grid: %v", err)
 				}
 				if diff := cmp.Diff(wantBuf, buf); diff != "" {
-					t.Errorf("shrinkGrid() got unexpected buf diff (-want +got):\n%s", diff)
+					t.Errorf("unexpected buf diff (-want +got):\n%s", diff)
 				}
 			}
 		})
@@ -3940,6 +3549,16 @@ func TestColumnStats(t *testing.T) {
 }
 
 func TestConstructGrid(t *testing.T) {
+	defaultCustomColumnHeaders := []*configpb.TestGroup_ColumnHeader{
+		{
+			Property:           "hello",
+			ConfigurationValue: "world!",
+		},
+		{
+			Property:           "foo",
+			ConfigurationValue: "bar",
+		},
+	}
 	cases := []struct {
 		name                    string
 		cols                    []inflatedColumn
@@ -3947,6 +3566,7 @@ func TestConstructGrid(t *testing.T) {
 		numPassesToDisableAlert int
 		issues                  map[string][]string
 		brokenThreshold         float32
+		columnHeader            []*configpb.TestGroup_ColumnHeader
 		expected                *statepb.Grid
 	}{
 		{
@@ -3954,7 +3574,8 @@ func TestConstructGrid(t *testing.T) {
 			expected: &statepb.Grid{},
 		},
 		{
-			name: "multiple columns",
+			name:         "multiple columns",
+			columnHeader: defaultCustomColumnHeaders,
 			cols: []inflatedColumn{
 				{
 					Column: &statepb.Column{Build: "15"},
@@ -4058,6 +3679,7 @@ func TestConstructGrid(t *testing.T) {
 		},
 		{
 			name:            "multiple columns with threshold",
+			columnHeader:    defaultCustomColumnHeaders,
 			brokenThreshold: 0.3,
 			cols: []inflatedColumn{
 				{
@@ -4412,8 +4034,8 @@ func TestConstructGrid(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := ConstructGrid(logrus.WithField("name", tc.name), tc.cols, tc.issues, tc.numFailuresToAlert, tc.numPassesToDisableAlert, true, "userProperty", tc.brokenThreshold)
-			alertRows(tc.expected.Columns, tc.expected.Rows, tc.numFailuresToAlert, tc.numPassesToDisableAlert, true, "userProperty")
+			actual := ConstructGrid(logrus.WithField("name", tc.name), tc.cols, tc.issues, tc.numFailuresToAlert, tc.numPassesToDisableAlert, true, "userProperty", tc.brokenThreshold, tc.columnHeader)
+			alertRows(tc.expected.Columns, tc.expected.Rows, tc.numFailuresToAlert, tc.numPassesToDisableAlert, true, "userProperty", tc.columnHeader)
 			for _, row := range tc.expected.Rows {
 				sort.SliceStable(row.Metric, func(i, j int) bool {
 					return sortorder.NaturalLess(row.Metric[i], row.Metric[j])
@@ -5027,6 +4649,7 @@ func TestAppendColumn(t *testing.T) {
 func TestDynamicEmails(t *testing.T) {
 	columnWithEmails := statepb.Column{Build: "columnWithEmail", Started: 100 - float64(0), EmailAddresses: []string{"email1@", "email2@"}}
 	anotherColumnWithEmails := statepb.Column{Build: "anotherColumnWithEmails", Started: 100 - float64(1), EmailAddresses: []string{"email3@", "email2@"}}
+	customColumnHeaders := map[string]string{}
 	cases := []struct {
 		name     string
 		row      *statepb.Row
@@ -5043,7 +4666,7 @@ func TestDynamicEmails(t *testing.T) {
 				CellIds:  []string{""},
 			},
 			columns:  []*statepb.Column{&columnWithEmails},
-			expected: alertInfo(1, "", "", "", nil, &columnWithEmails, &columnWithEmails, nil, false),
+			expected: alertInfo(1, "", "", "", nil, &columnWithEmails, &columnWithEmails, nil, false, customColumnHeaders),
 		},
 		{
 			name: "two column with dynamic emails, we get only the first one",
@@ -5055,7 +4678,7 @@ func TestDynamicEmails(t *testing.T) {
 				CellIds:  []string{"", ""},
 			},
 			columns:  []*statepb.Column{&anotherColumnWithEmails, &columnWithEmails},
-			expected: alertInfo(2, "", "", "", nil, &columnWithEmails, &anotherColumnWithEmails, nil, false),
+			expected: alertInfo(2, "", "", "", nil, &columnWithEmails, &anotherColumnWithEmails, nil, false, customColumnHeaders),
 		},
 		{
 			name: "first column don't have results, second column emails on the alert",
@@ -5068,11 +4691,12 @@ func TestDynamicEmails(t *testing.T) {
 				CellIds:  []string{"", ""},
 			},
 			columns:  []*statepb.Column{&columnWithEmails, &anotherColumnWithEmails},
-			expected: alertInfo(1, "", "", "", nil, &anotherColumnWithEmails, &anotherColumnWithEmails, nil, false),
+			expected: alertInfo(1, "", "", "", nil, &anotherColumnWithEmails, &anotherColumnWithEmails, nil, false, customColumnHeaders),
 		},
 	}
 	for _, tc := range cases {
-		actual := alertRow(tc.columns, tc.row, 1, 1, false, "")
+		defaultColumnHeaders := []*configpb.TestGroup_ColumnHeader{}
+		actual := alertRow(tc.columns, tc.row, 1, 1, false, "", defaultColumnHeaders)
 		if diff := cmp.Diff(tc.expected, actual, protocmp.Transform()); diff != "" {
 			t.Errorf("alertRow() not as expected (-want, +got): %s", diff)
 		}
@@ -5085,15 +4709,32 @@ func TestAlertRow(t *testing.T) {
 		columns = append(columns, &statepb.Column{
 			Build:   id,
 			Started: 100 - float64(i),
+			Extra: []string{
+				"world",
+				"bar",
+			},
 		})
 	}
+	defaultColumnHeaders := []*configpb.TestGroup_ColumnHeader{
+		{
+			Property: "hello",
+		},
+		{
+			Property: "foo",
+		},
+	}
+	customColumnHeaders := map[string]string{
+		"hello": "world",
+		"foo":   "bar",
+	}
 	cases := []struct {
-		name      string
-		row       *statepb.Row
-		failOpen  int
-		passClose int
-		property  string
-		expected  *statepb.AlertInfo
+		name         string
+		row          *statepb.Row
+		failOpen     int
+		passClose    int
+		property     string
+		columnHeader []*configpb.TestGroup_ColumnHeader
+		expected     *statepb.AlertInfo
 	}{
 		{
 			name: "never alert by default",
@@ -5134,7 +4775,8 @@ func TestAlertRow(t *testing.T) {
 			failOpen: 3,
 		},
 		{
-			name: "new failures alert",
+			name:         "new failures alert",
+			columnHeader: defaultColumnHeaders,
 			row: &statepb.Row{
 				Results: []int32{
 					int32(statuspb.TestStatus_FAIL), 3,
@@ -5144,7 +4786,7 @@ func TestAlertRow(t *testing.T) {
 				CellIds:  []string{"no", "no again", "very wrong", "yes", "hi", "hello"},
 			},
 			failOpen: 3,
-			expected: alertInfo(3, "no", "very wrong", "no", nil, columns[2], columns[0], columns[3], false),
+			expected: alertInfo(3, "no", "very wrong", "no", nil, columns[2], columns[0], columns[3], false, customColumnHeaders),
 		},
 		{
 			name: "rows without cell IDs can alert",
@@ -5156,10 +4798,11 @@ func TestAlertRow(t *testing.T) {
 				Messages: []string{"no", "no again", "very wrong", "yes", "hi", "hello"},
 			},
 			failOpen: 3,
-			expected: alertInfo(3, "no", "", "", nil, columns[2], columns[0], columns[3], false),
+			expected: alertInfo(3, "no", "", "", nil, columns[2], columns[0], columns[3], false, nil),
 		},
 		{
-			name: "too few passes do not close",
+			name:         "too few passes do not close",
+			columnHeader: defaultColumnHeaders,
 			row: &statepb.Row{
 				Results: []int32{
 					int32(statuspb.TestStatus_PASS), 2,
@@ -5170,10 +4813,11 @@ func TestAlertRow(t *testing.T) {
 			},
 			failOpen:  1,
 			passClose: 3,
-			expected:  alertInfo(4, "yay", "hello", "yep", nil, columns[5], columns[2], nil, false),
+			expected:  alertInfo(4, "yay", "hello", "yep", nil, columns[5], columns[2], nil, false, customColumnHeaders),
 		},
 		{
-			name: "flakes do not close",
+			name:         "flakes do not close",
+			columnHeader: defaultColumnHeaders,
 			row: &statepb.Row{
 				Results: []int32{
 					int32(statuspb.TestStatus_FLAKY), 2,
@@ -5183,7 +4827,7 @@ func TestAlertRow(t *testing.T) {
 				CellIds:  []string{"wrong", "no", "yep", "very wrong", "hi", "hello"},
 			},
 			failOpen: 1,
-			expected: alertInfo(4, "yay", "hello", "yep", nil, columns[5], columns[2], nil, false),
+			expected: alertInfo(4, "yay", "hello", "yep", nil, columns[5], columns[2], nil, false, customColumnHeaders),
 		},
 		{
 			name: "failures after insufficient passes",
@@ -5200,7 +4844,7 @@ func TestAlertRow(t *testing.T) {
 			},
 			failOpen:  2,
 			passClose: 2,
-			expected:  alertInfo(4, "newest-fail", "f5", "f0", nil, columns[5], columns[0], nil, false),
+			expected:  alertInfo(4, "newest-fail", "f5", "f0", nil, columns[5], columns[0], nil, false, nil),
 		},
 		{
 			name: "close alert",
@@ -5225,7 +4869,7 @@ func TestAlertRow(t *testing.T) {
 			},
 			failOpen:  5,
 			passClose: 2,
-			expected:  alertInfo(5, "yay", "nada", "yay-cell", nil, columns[5], columns[0], nil, false),
+			expected:  alertInfo(5, "yay", "nada", "yay-cell", nil, columns[5], columns[0], nil, false, nil),
 		},
 		{
 			name: "track passes through empty results",
@@ -5251,10 +4895,11 @@ func TestAlertRow(t *testing.T) {
 				CellIds:  []string{"wrong", "yep", "no2", "no3", "no4", "no5"},
 			},
 			failOpen: 1,
-			expected: alertInfo(5, "fail1-expected", "no5", "yep", nil, columns[5], columns[1], nil, false),
+			expected: alertInfo(5, "fail1-expected", "no5", "yep", nil, columns[5], columns[1], nil, false, nil),
 		},
 		{
-			name: "complex",
+			name:         "complex",
+			columnHeader: defaultColumnHeaders,
 			row: &statepb.Row{
 				Results: []int32{
 					int32(statuspb.TestStatus_PASS), 1,
@@ -5268,7 +4913,7 @@ func TestAlertRow(t *testing.T) {
 			},
 			failOpen:  2,
 			passClose: 2,
-			expected:  alertInfo(3, "latest fail", "yes-f4", "no-f1", nil, columns[4], columns[1], columns[5], false),
+			expected:  alertInfo(3, "latest fail", "yes-f4", "no-f1", nil, columns[4], columns[1], columns[5], false, customColumnHeaders),
 		},
 		{
 			name: "alert consecutive failures only",
@@ -5299,10 +4944,11 @@ func TestAlertRow(t *testing.T) {
 			},
 			failOpen: 3,
 			property: "some-prop",
-			expected: alertInfo(3, "no", "very wrong", "no", map[string]string{"some-prop": "prop0"}, columns[2], columns[0], columns[3], false),
+			expected: alertInfo(3, "no", "very wrong", "no", map[string]string{"some-prop": "prop0"}, columns[2], columns[0], columns[3], false, nil),
 		},
 		{
-			name: "properties after passes",
+			name:         "properties after passes",
+			columnHeader: defaultColumnHeaders,
 			row: &statepb.Row{
 				Results: []int32{
 					int32(statuspb.TestStatus_PASS), 2,
@@ -5316,7 +4962,7 @@ func TestAlertRow(t *testing.T) {
 			failOpen:  3,
 			passClose: 3,
 			property:  "some-prop",
-			expected:  alertInfo(3, "very wrong", "hi", "very wrong", map[string]string{"some-prop": "prop2"}, columns[4], columns[2], columns[5], false),
+			expected:  alertInfo(3, "very wrong", "hi", "very wrong", map[string]string{"some-prop": "prop2"}, columns[4], columns[2], columns[5], false, customColumnHeaders),
 		},
 		{
 			name: "empty properties",
@@ -5331,7 +4977,7 @@ func TestAlertRow(t *testing.T) {
 			},
 			failOpen: 3,
 			property: "some-prop",
-			expected: alertInfo(3, "no", "very wrong", "no", nil, columns[2], columns[0], columns[3], false),
+			expected: alertInfo(3, "no", "very wrong", "no", nil, columns[2], columns[0], columns[3], false, nil),
 		},
 		{
 			name: "insufficient properties",
@@ -5347,13 +4993,35 @@ func TestAlertRow(t *testing.T) {
 			failOpen:  3,
 			passClose: 3,
 			property:  "some-prop",
-			expected:  alertInfo(4, "very wrong", "hello", "very wrong", nil, columns[5], columns[2], nil, false),
+			expected:  alertInfo(4, "very wrong", "hello", "very wrong", nil, columns[5], columns[2], nil, false, nil),
+		},
+		{
+			name: "insufficient column header values",
+			columnHeader: append(
+				defaultColumnHeaders,
+				&configpb.TestGroup_ColumnHeader{
+					Property: "extra-key",
+				},
+			),
+			row: &statepb.Row{
+				Results: []int32{
+					int32(statuspb.TestStatus_PASS), 2,
+					int32(statuspb.TestStatus_FAIL), 4,
+				},
+				Messages:     []string{"no", "no again", "very wrong", "yes", "hi", "hello"},
+				CellIds:      []string{"no", "no again", "very wrong", "yes", "hi", "hello"},
+				UserProperty: []string{"prop0"},
+			},
+			failOpen:  3,
+			passClose: 3,
+			property:  "some-prop",
+			expected:  alertInfo(4, "very wrong", "hello", "very wrong", nil, columns[5], columns[2], nil, false, customColumnHeaders),
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := alertRow(columns, tc.row, tc.failOpen, tc.passClose, false, tc.property)
+			actual := alertRow(columns, tc.row, tc.failOpen, tc.passClose, false, tc.property, tc.columnHeader)
 			if diff := cmp.Diff(tc.expected, actual, protocmp.Transform()); diff != "" {
 				t.Errorf("alertRow() not as expected (-want, +got): %s", diff)
 			}
@@ -5664,6 +5332,96 @@ func TestHotlistIDs(t *testing.T) {
 			got := hotlistIDs(col)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("hotlistIDs(%v) differed (-want, +got): %s", col, diff)
+			}
+		})
+	}
+}
+
+func TestTruncateLastColumn(t *testing.T) {
+	cases := []struct {
+		name   string
+		grid   []InflatedColumn
+		expect []InflatedColumn
+	}{
+		{
+			name:   "empty grid",
+			grid:   []InflatedColumn{},
+			expect: []inflatedColumn{},
+		},
+		{
+			name:   "nil grid",
+			grid:   nil,
+			expect: nil,
+		},
+		{
+			name: "grid",
+			grid: []InflatedColumn{
+				{
+					Cells: map[string]Cell{
+						"row_1": {
+							ID:     "row_1",
+							Result: statuspb.TestStatus_PASS,
+						},
+						"row_2": {
+							ID:     "row_2",
+							Result: statuspb.TestStatus_FAIL,
+						},
+					},
+				},
+				{
+					Cells: map[string]Cell{
+						"row_1": {
+							ID:     "row_1",
+							Result: statuspb.TestStatus_PASS,
+						},
+						"row_2": {
+							ID:     "row_2",
+							Result: statuspb.TestStatus_PASS,
+						},
+					},
+				},
+			},
+			expect: []InflatedColumn{
+				{
+					Cells: map[string]Cell{
+						"row_1": {
+							ID:     "row_1",
+							Result: statuspb.TestStatus_PASS,
+						},
+						"row_2": {
+							ID:     "row_2",
+							Result: statuspb.TestStatus_FAIL,
+						},
+					},
+				},
+				{
+					Cells: map[string]Cell{
+						"row_1": {
+							ID:      "row_1",
+							Result:  statuspb.TestStatus_UNKNOWN,
+							Icon:    "...",
+							Message: "100 candy grid exceeds maximum size of 10 candys",
+						},
+						"row_2": {
+							ID:      "row_2",
+							Result:  statuspb.TestStatus_UNKNOWN,
+							Icon:    "...",
+							Message: "100 candy grid exceeds maximum size of 10 candys",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := tc.grid
+			truncateLastColumn(actual, 100, 10, "candy")
+
+			if diff := cmp.Diff(actual, tc.expect); diff != "" {
+				t.Error("mismatch (+got, -want)")
+				t.Log(diff)
 			}
 		})
 	}

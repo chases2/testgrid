@@ -17,14 +17,11 @@ limitations under the License.
 package tabulator
 
 import (
-	"bytes"
-	"compress/zlib"
 	"context"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/sirupsen/logrus"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
 
 	configpb "github.com/GoogleCloudPlatform/testgrid/pb/config"
@@ -280,7 +277,6 @@ func Test_Tabulate(t *testing.T) {
 		grid           *statepb.Grid
 		dashCfg        *configpb.DashboardTab
 		groupCfg       *configpb.TestGroup
-		dropCols       bool
 		calculateStats bool
 		useTabAlert    bool
 		expected       *statepb.Grid
@@ -288,7 +284,18 @@ func Test_Tabulate(t *testing.T) {
 		{
 			name:     "empty grid is tolerated",
 			grid:     &statepb.Grid{},
+			dashCfg:  &configpb.DashboardTab{},
+			groupCfg: &configpb.TestGroup{},
 			expected: &statepb.Grid{},
+		},
+		{
+			name:     "nil grid is not tolerated",
+			dashCfg:  &configpb.DashboardTab{},
+			groupCfg: &configpb.TestGroup{},
+		},
+		{
+			name: "nil config is not tolerated",
+			grid: &statepb.Grid{},
 		},
 		{
 			name: "basic grid",
@@ -310,6 +317,7 @@ func Test_Tabulate(t *testing.T) {
 			dashCfg: &configpb.DashboardTab{
 				Name: "tab",
 			},
+			groupCfg: &configpb.TestGroup{},
 			expected: &statepb.Grid{
 				Columns: []*statepb.Column{
 					{Name: "okay"},
@@ -350,6 +358,7 @@ func Test_Tabulate(t *testing.T) {
 				Name:        "tab",
 				BaseOptions: "exclude-filter-by-regex=bad",
 			},
+			groupCfg: &configpb.TestGroup{},
 			expected: &statepb.Grid{
 				Columns: []*statepb.Column{
 					{Name: "okay"},
@@ -365,7 +374,7 @@ func Test_Tabulate(t *testing.T) {
 			},
 		},
 		{
-			name: "Filters out regex tabs, but does not yet drop columns",
+			name: "Filters out regex tabs, and drops empty columns",
 			grid: buildGrid(t,
 				updater.InflatedColumn{
 					Column: &statepb.Column{Name: "okay"},
@@ -389,48 +398,7 @@ func Test_Tabulate(t *testing.T) {
 				Name:        "tab",
 				BaseOptions: "exclude-filter-by-regex=bad",
 			},
-			dropCols: false,
-			expected: &statepb.Grid{
-				Columns: []*statepb.Column{
-					{Name: "okay"},
-					{Name: "weird"},
-					{Name: "still-ok"},
-				},
-				Rows: []*statepb.Row{
-					{
-						Name:    "first",
-						Id:      "first",
-						Results: []int32{int32(tspb.TestStatus_BUILD_PASSED), 1, int32(tspb.TestStatus_NO_RESULT), 1, int32(tspb.TestStatus_BUILD_PASSED), 1},
-					},
-				},
-			},
-		},
-		{
-			name: "Filters out regex tabs, dropping empty columns when asked",
-			grid: buildGrid(t,
-				updater.InflatedColumn{
-					Column: &statepb.Column{Name: "okay"},
-					Cells: map[string]updater.Cell{
-						"first": {Result: tspb.TestStatus_BUILD_PASSED},
-					},
-				},
-				updater.InflatedColumn{
-					Column: &statepb.Column{Name: "weird"},
-					Cells: map[string]updater.Cell{
-						"bad": {Result: tspb.TestStatus_BUILD_PASSED},
-					},
-				},
-				updater.InflatedColumn{
-					Column: &statepb.Column{Name: "still-ok"},
-					Cells: map[string]updater.Cell{
-						"first": {Result: tspb.TestStatus_BUILD_PASSED},
-					},
-				}),
-			dashCfg: &configpb.DashboardTab{
-				Name:        "tab",
-				BaseOptions: "exclude-filter-by-regex=bad",
-			},
-			dropCols: true,
+			groupCfg: &configpb.TestGroup{},
 			expected: &statepb.Grid{
 				Columns: []*statepb.Column{
 					{Name: "okay"},
@@ -446,43 +414,7 @@ func Test_Tabulate(t *testing.T) {
 			},
 		},
 		{
-			name: "copies alerts while not dropping empty columns",
-			grid: func() *statepb.Grid {
-				var g statepb.Grid
-				r := map[string]*statepb.Row{}
-				updater.AppendColumn(&g, r, updater.InflatedColumn{
-					Column: &statepb.Column{Name: "result"},
-					Cells: map[string]updater.Cell{
-						"bad": {Result: tspb.TestStatus_BUILD_FAIL},
-					},
-				})
-				g.Rows[0].AlertInfo = &statepb.AlertInfo{
-					FailCount: 999,
-				}
-				return &g
-			}(),
-			dashCfg: &configpb.DashboardTab{
-				Name: "tab",
-			},
-			dropCols: false,
-			expected: &statepb.Grid{
-				Columns: []*statepb.Column{
-					{Name: "result"},
-				},
-				Rows: []*statepb.Row{
-					{
-						Name:    "bad",
-						Id:      "bad",
-						Results: []int32{int32(tspb.TestStatus_BUILD_FAIL), 1},
-						AlertInfo: &statepb.AlertInfo{
-							FailCount: 999,
-						},
-					},
-				},
-			},
-		},
-		{
-			name: "calculate alerts after dropping empty columns, using test group",
+			name: "calculate alerts using test group",
 			grid: buildGrid(t,
 				updater.InflatedColumn{
 					Column: &statepb.Column{Name: "final"},
@@ -508,12 +440,12 @@ func Test_Tabulate(t *testing.T) {
 						"flaky":  {Result: tspb.TestStatus_BUILD_PASSED},
 					},
 				}),
+			dashCfg: &configpb.DashboardTab{},
 			groupCfg: &configpb.TestGroup{
 				Name:                    "group",
 				NumFailuresToAlert:      1,
 				NumPassesToDisableAlert: 1,
 			},
-			dropCols:    true,
 			useTabAlert: false,
 			expected: &statepb.Grid{
 				Columns: []*statepb.Column{
@@ -544,7 +476,7 @@ func Test_Tabulate(t *testing.T) {
 			},
 		},
 		{
-			name: "calculate alerts after dropping empty columns, using tab state",
+			name: "calculate alerts using tab state",
 			grid: buildGrid(t,
 				updater.InflatedColumn{
 					Column: &statepb.Column{Name: "final"},
@@ -577,7 +509,7 @@ func Test_Tabulate(t *testing.T) {
 					NumPassesToDisableAlert: 1,
 				},
 			},
-			dropCols:    true,
+			groupCfg:    &configpb.TestGroup{},
 			useTabAlert: true,
 			expected: &statepb.Grid{
 				Columns: []*statepb.Column{
@@ -642,7 +574,7 @@ func Test_Tabulate(t *testing.T) {
 				},
 				BrokenColumnThreshold: 0.5,
 			},
-			dropCols:       true,
+			groupCfg:       &configpb.TestGroup{},
 			useTabAlert:    true,
 			calculateStats: true,
 			expected: &statepb.Grid{
@@ -712,7 +644,7 @@ func Test_Tabulate(t *testing.T) {
 					NumPassesToDisableAlert: 1,
 				},
 			},
-			dropCols:       true,
+			groupCfg:       &configpb.TestGroup{},
 			useTabAlert:    true,
 			calculateStats: true,
 			expected: &statepb.Grid{
@@ -739,46 +671,6 @@ func Test_Tabulate(t *testing.T) {
 			},
 		},
 		{
-			name: "calculate stats, drop columns false",
-			grid: buildGrid(t,
-				updater.InflatedColumn{
-					Column: &statepb.Column{Name: "initial"},
-					Cells: map[string]updater.Cell{
-						"okay":   {Result: tspb.TestStatus_BUILD_PASSED},
-						"broken": {Result: tspb.TestStatus_BUILD_FAIL},
-					},
-				}),
-			dashCfg: &configpb.DashboardTab{
-				Name: "tab",
-				AlertOptions: &configpb.DashboardTabAlertOptions{
-					NumFailuresToAlert:      1,
-					NumPassesToDisableAlert: 1,
-				},
-			},
-			dropCols:       false,
-			useTabAlert:    true,
-			calculateStats: true,
-			expected: &statepb.Grid{
-				Columns: []*statepb.Column{
-					{
-						Name: "initial",
-					},
-				},
-				Rows: []*statepb.Row{
-					{
-						Name:    "okay",
-						Id:      "okay",
-						Results: []int32{int32(tspb.TestStatus_BUILD_PASSED), 1},
-					},
-					{
-						Name:    "broken",
-						Id:      "broken",
-						Results: []int32{int32(tspb.TestStatus_BUILD_FAIL), 1},
-					},
-				},
-			},
-		},
-		{
 			name: "calculate stats, calculate stats false",
 			grid: buildGrid(t,
 				updater.InflatedColumn{
@@ -796,7 +688,7 @@ func Test_Tabulate(t *testing.T) {
 				},
 				BrokenColumnThreshold: 0.5,
 			},
-			dropCols:       true,
+			groupCfg:       &configpb.TestGroup{},
 			useTabAlert:    true,
 			calculateStats: false,
 			expected: &statepb.Grid{
@@ -829,17 +721,18 @@ func Test_Tabulate(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			if tc.groupCfg == nil {
-				tc.groupCfg = &configpb.TestGroup{}
-			}
-			if tc.dashCfg == nil {
-				tc.dashCfg = &configpb.DashboardTab{}
+			actual, err := tabulate(ctx, logrus.New(), tc.grid, tc.dashCfg, tc.groupCfg, tc.calculateStats, tc.useTabAlert, nil) // TODO(slchase): add tests for not nil
+			if tc.expected == nil {
+				if err == nil {
+					t.Error("Expected an error, but got none")
+				}
+				return
 			}
 
-			actual, err := tabulate(ctx, logrus.New(), tc.grid, tc.dashCfg, tc.groupCfg, tc.dropCols, tc.calculateStats, tc.useTabAlert)
 			if err != nil {
 				t.Fatalf("Unexpected error: %v", err)
 			}
+
 			diff := cmp.Diff(actual, tc.expected, protocmp.Transform(),
 				protocmp.IgnoreFields(&statepb.Row{}, "cell_ids", "icons", "messages", "user_property", "properties"), // mostly empty
 				protocmp.IgnoreFields(&statepb.AlertInfo{}, "fail_time"),                                              // import not needed to determine if alert was set
@@ -870,73 +763,60 @@ func Test_CreateTabState(t *testing.T) {
 		},
 	})
 
-	tabConfig := configpb.DashboardTab{
-		Name: "no filters",
-	}
-
 	testcases := []struct {
-		name          string
-		existingState fake.Object
-		confirm       bool
-		expectError   bool
-		expectUpload  bool
+		name         string
+		state        *statepb.Grid
+		confirm      bool
+		expectError  bool
+		expectUpload bool
 	}{
 		{
 			name:        "Fails if data is missing",
 			expectError: true,
 		},
 		{
-			name: "Does not write without confirm",
-			existingState: func() fake.Object {
-				return fake.Object{
-					Data: string(compress(gridBuf(&exampleGrid))),
-				}
-			}(),
+			name:        "Does not write without confirm",
+			state:       &exampleGrid,
 			confirm:     false,
 			expectError: false,
 		},
 		{
-			name: "Fails with uncompressed grid",
-			existingState: func() fake.Object {
-				return fake.Object{
-					Data: string(gridBuf(&exampleGrid)),
-				}
-			}(),
-			expectError: true,
-		},
-		{
-			name: "Writes data when upload is expected",
-			existingState: func() fake.Object {
-				return fake.Object{
-					Data: string(compress(gridBuf(&exampleGrid))),
-				}
-			}(),
+			name:         "Writes data when upload is expected",
+			state:        &exampleGrid,
 			confirm:      true,
 			expectUpload: true,
 		},
 	}
 
-	fromPath := newPathOrDie("gs://example/from")
-	toPath := newPathOrDie("gs://example/to")
+	expectedPath := newPathOrDie("gs://example/prefix/dashboard/tab")
+	configPath := newPathOrDie("gs://example/config")
 
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			client := fake.UploadClient{
-				Client: fake.Client{
-					Opener: fake.Opener{
-						*fromPath: tc.existingState,
-					},
-				},
 				Uploader: fake.Uploader{},
 			}
 
-			err := createTabState(ctx, logrus.New(), client, &tabConfig, &configpb.TestGroup{}, *fromPath, *toPath, tc.confirm, true, true, true)
+			task := writeTask{
+				dashboard: &configpb.Dashboard{
+					Name: "dashboard",
+				},
+				tab: &configpb.DashboardTab{
+					Name: "tab",
+				},
+				group: &configpb.TestGroup{
+					Name: "testgroup",
+				},
+				data: tc.state,
+			}
+
+			err := createTabState(ctx, logrus.New(), client, task, *configPath, "prefix", tc.confirm, true, true, false)
 			if tc.expectError == (err == nil) {
 				t.Errorf("Wrong error: want %t, got %v", tc.expectError, err)
 			}
-			res, ok := client.Uploader[*toPath]
+			res, ok := client.Uploader[*expectedPath]
 			uploaded := ok && (len(res.Buf) != 0)
 			if uploaded != tc.expectUpload {
 				t.Errorf("Wrong upload: want %t, got %v", tc.expectUpload, ok)
@@ -945,22 +825,290 @@ func Test_CreateTabState(t *testing.T) {
 	}
 }
 
-func gridBuf(grid *statepb.Grid) []byte {
-	buf, err := proto.Marshal(grid)
-	if err != nil {
-		panic(err)
+func Test_MergeGrids(t *testing.T) {
+	testcases := []struct {
+		name    string
+		current []updater.InflatedColumn
+		add     []updater.InflatedColumn
+		expect  []updater.InflatedColumn
+	}{
+		{
+			name:    "Creating a grid",
+			current: []updater.InflatedColumn{},
+			add: []updater.InflatedColumn{
+				{
+					Column: &statepb.Column{
+						Name:    "cool results",
+						Started: 12345678,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "result too big :(",
+						Started: 123456,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_RUNNING},
+					},
+				},
+			},
+			expect: []updater.InflatedColumn{
+				{
+					Column: &statepb.Column{
+						Name:    "cool results",
+						Started: 12345678,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "result too big :(",
+						Started: 123456,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_RUNNING},
+					},
+				},
+			},
+		},
+		{
+			name: "two identical results: displays new result",
+			current: []updater.InflatedColumn{
+				{
+					Column: &statepb.Column{
+						Name:    "result 2",
+						Build:   "build",
+						Started: 1234,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_RUNNING},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "result 1",
+						Build:   "build",
+						Started: 123,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_RUNNING},
+					},
+				},
+			},
+			add: []updater.InflatedColumn{
+				{
+					Column: &statepb.Column{
+						Name:    "result 2",
+						Build:   "build",
+						Started: 1234,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "result 1",
+						Build:   "build",
+						Started: 123,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "too big",
+						Build:   "build",
+						Started: 12,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_UNKNOWN},
+					},
+				},
+			},
+			expect: []updater.InflatedColumn{
+				{
+					Column: &statepb.Column{
+						Name:    "result 2",
+						Build:   "build",
+						Started: 1234,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "result 1",
+						Build:   "build",
+						Started: 123,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "too big",
+						Build:   "build",
+						Started: 12,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_UNKNOWN},
+					},
+				},
+			},
+		},
+		{
+			name: "adds new info: keeps historical data",
+			current: []updater.InflatedColumn{
+				{
+					Column: &statepb.Column{
+						Name:    "fourth",
+						Started: 1234,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "third",
+						Started: 123,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "second",
+						Started: 12,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "first",
+						Started: 1,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {
+							Result: tspb.TestStatus_UNKNOWN,
+							Icon:   "...",
+						},
+					},
+				},
+			},
+			add: []updater.InflatedColumn{
+				{
+					Column: &statepb.Column{
+						Name:    "sixth",
+						Started: 123456,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "fifth",
+						Started: 12345,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "fourth",
+						Started: 1234,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {
+							Result: tspb.TestStatus_UNKNOWN,
+							Icon:   "...",
+						},
+					},
+				},
+			},
+			expect: []updater.InflatedColumn{
+				{
+					Column: &statepb.Column{
+						Name:    "sixth",
+						Started: 123456,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "fifth",
+						Started: 12345,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "fourth",
+						Started: 1234,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "third",
+						Started: 123,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "second",
+						Started: 12,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {Result: tspb.TestStatus_PASS},
+					},
+				},
+				{
+					Column: &statepb.Column{
+						Name:    "first",
+						Started: 1,
+					},
+					Cells: map[string]updater.Cell{
+						"cell": {
+							Result: tspb.TestStatus_UNKNOWN,
+							Icon:   "...",
+						},
+					},
+				},
+			},
+		},
 	}
-	return buf
-}
 
-func compress(buf []byte) []byte {
-	var zbuf bytes.Buffer
-	zw := zlib.NewWriter(&zbuf)
-	if _, err := zw.Write(buf); err != nil {
-		panic(err)
+	for _, test := range testcases {
+		t.Run(test.name, func(t *testing.T) {
+			actual := mergeGrids(test.current, test.add)
+			if diff := cmp.Diff(actual, test.expect, protocmp.Transform()); diff != "" {
+				t.Errorf("Unexpected (-got, +want): %s", diff)
+				t.Logf("Got %#v", actual)
+			}
+		})
 	}
-	if err := zw.Close(); err != nil {
-		panic(err)
-	}
-	return zbuf.Bytes()
 }

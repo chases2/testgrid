@@ -47,8 +47,9 @@ fi
 genproto() {
   dir=$(dirname "$1")
   base=$(basename "$1")
-  out=$dest/$dir/${base%.proto}.pb.go
-  rm -f "$out" # mac will complain otherwise
+  out=$dest/github.com/GoogleCloudPlatform/testgrid/$dir/${base%.proto}.pb.go
+  final=$dest/$dir/${base%.proto}.pb.go
+  rm -f "$final" "$out" # mac will complain otherwise
   (
     # TODO(fejta): this _virtual_imports piece is super fragile
     # Add any extra well-known imports to data and then add a new path
@@ -57,12 +58,12 @@ genproto() {
         "--proto_path=$dir" \
         "--proto_path=$dest" \
         "--proto_path=$_virtual_imports/timestamp_proto" \
-        "--go_out=${grpc},${importmap}:$dest/$dir" \
+        "--go_out=${grpc},${importmap}:$dest" \
         "$1"
   )
   tmp=$(mktemp)
   mv "$out" "$tmp"
-  cat "$boiler" "$tmp" > "$out"
+  cat "$boiler" "$tmp" > "$final"
 }
 
 echo -n "Generating protos: " >&2

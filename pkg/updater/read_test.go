@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"net/url"
 	"sort"
 	"sync"
@@ -193,10 +194,13 @@ func TestHintStarted(t *testing.T) {
 	}
 }
 
+func pstr(s string) *string { return &s }
+
 func TestReadColumns(t *testing.T) {
 	now := time.Now().Unix()
 	yes := true
 	var no bool
+	var noStartErr *noStartError
 	cases := []struct {
 		name               string
 		ctx                context.Context
@@ -206,6 +210,7 @@ func TestReadColumns(t *testing.T) {
 		dur                time.Duration
 		concurrency        int
 		readResultOverride *resultReader
+		enableIgnoreSkip   bool
 
 		expected []InflatedColumn
 		err      bool
@@ -523,9 +528,9 @@ func TestReadColumns(t *testing.T) {
 				GcsPrefix: "bucket/path/to/build/",
 			},
 			expected: []InflatedColumn{
-				ancientColumn("10", .01, nil),
-				ancientColumn("11", .02, nil),
-				ancientColumn("12", .03, nil),
+				ancientColumn("10", .01, nil, fmt.Sprintf("build too old; started %v before %v)", now+10, now+13)),
+				ancientColumn("11", .02, nil, fmt.Sprintf("build too old; started %v before %v)", now+11, now+13)),
+				ancientColumn("12", .03, nil, fmt.Sprintf("build too old; started %v before %v)", now+12, now+13)),
 				{
 					Column: &statepb.Column{
 						Build:   "13",
@@ -561,10 +566,35 @@ func TestReadColumns(t *testing.T) {
 			},
 		},
 		{
-			name:               "high concurrency works with basic reader",
-			concurrency:        4,
-			readResultOverride: basicResultReader(),
+			name: "include no-start-time column",
+			stop: time.Unix(now+13, 0), // should capture 15, 14, 13
 			builds: []fakeBuild{
+				{
+					id: "15",
+					started: &fakeObject{
+						Data: jsonData(metadata.Started{Timestamp: now + 15}),
+					},
+					finished: &fakeObject{
+						Data: jsonData(metadata.Finished{
+							Timestamp: pint64(now + 30),
+							Passed:    &yes,
+						}),
+					},
+					podInfo: podInfoSuccess,
+				},
+				{
+					id: "14",
+					started: &fakeObject{
+						Data: jsonData(metadata.Started{Timestamp: 0}),
+					},
+					finished: &fakeObject{
+						Data: jsonData(metadata.Finished{
+							Timestamp: pint64(now + 28),
+							Passed:    &yes,
+						}),
+					},
+					podInfo: podInfoSuccess,
+				},
 				{
 					id: "13",
 					started: &fakeObject{
@@ -577,43 +607,6 @@ func TestReadColumns(t *testing.T) {
 						}),
 					},
 					podInfo: podInfoSuccess,
-				},
-				{
-					id: "12",
-					started: &fakeObject{
-						Data: jsonData(metadata.Started{Timestamp: now + 12}),
-					},
-					finished: &fakeObject{
-						Data: jsonData(metadata.Finished{
-							Timestamp: pint64(now + 24),
-							Passed:    &yes,
-						}),
-					},
-				},
-				{
-					id: "11",
-					started: &fakeObject{
-						Data: jsonData(metadata.Started{Timestamp: now + 11}),
-					},
-					finished: &fakeObject{
-						Data: jsonData(metadata.Finished{
-							Timestamp: pint64(now + 22),
-							Passed:    &yes,
-						}),
-					},
-					podInfo: podInfoSuccess,
-				},
-				{
-					id: "10",
-					started: &fakeObject{
-						Data: jsonData(metadata.Started{Timestamp: now + 10}),
-					},
-					finished: &fakeObject{
-						Data: jsonData(metadata.Finished{
-							Timestamp: pint64(now + 20),
-							Passed:    &yes,
-						}),
-					},
 				},
 			},
 			group: &configpb.TestGroup{
@@ -636,52 +629,21 @@ func TestReadColumns(t *testing.T) {
 						"build." + podInfoRow: podInfoPassCell,
 					},
 				},
+				noStartColumn("14", float64(now+13)*1000+0.01, nil, noStartErr.Error()), // start * 1000 + 0.01 * failures (1)
 				{
 					Column: &statepb.Column{
-						Build:   "12",
-						Hint:    "12",
-						Started: float64(now+12) * 1000,
+						Build:   "15",
+						Hint:    "15",
+						Started: float64(now+15) * 1000,
 					},
 					Cells: map[string]cell{
 						"build." + overallRow: {
 							Result: statuspb.TestStatus_PASS,
 							Metrics: map[string]float64{
-								"test-duration-minutes": 12 / 60.0,
-							},
-						},
-						"build." + podInfoRow: podInfoMissingCell,
-					},
-				},
-				{
-					Column: &statepb.Column{
-						Build:   "11",
-						Hint:    "11",
-						Started: float64(now+11) * 1000,
-					},
-					Cells: map[string]cell{
-						"build." + overallRow: {
-							Result: statuspb.TestStatus_PASS,
-							Metrics: map[string]float64{
-								"test-duration-minutes": 11 / 60.0,
+								"test-duration-minutes": 15 / 60.0,
 							},
 						},
 						"build." + podInfoRow: podInfoPassCell,
-					},
-				},
-				{
-					Column: &statepb.Column{
-						Build:   "10",
-						Hint:    "10",
-						Started: float64(now+10) * 1000,
-					},
-					Cells: map[string]cell{
-						"build." + overallRow: {
-							Result: statuspb.TestStatus_PASS,
-							Metrics: map[string]float64{
-								"test-duration-minutes": 10 / 60.0,
-							},
-						},
-						"build." + podInfoRow: podInfoMissingCell,
 					},
 				},
 			},
@@ -1086,6 +1048,116 @@ func TestReadColumns(t *testing.T) {
 				erroredColumn("10-b-err", 0.02, nil, "Failed to download gs://bucket/path/to/build/10-b-err/: started: read: open: fake open 10-b-err"),
 			},
 		},
+		{
+			name: "ignore_skip works when enabled",
+			group: &configpb.TestGroup{
+				IgnoreSkip: true,
+			},
+			enableIgnoreSkip: true,
+			builds: []fakeBuild{
+				{
+					id:      "build-1",
+					podInfo: podInfoSuccess,
+					started: &fakeObject{
+						Data: jsonData(metadata.Started{Timestamp: now}),
+					},
+					finished: &fakeObject{
+						Data: jsonData(metadata.Finished{
+							Timestamp: pint64(now + 10),
+							Passed:    &yes,
+						}),
+					},
+					artifacts: map[string]fakeObject{
+						"junit_context-a_33.xml": {
+							Data: xmlData(
+								junit.Suite{
+									Results: []junit.Result{
+										{
+											Name:    "visible skip non-default msg",
+											Skipped: &junit.Skipped{Message: *pstr("non-default message")},
+										},
+									},
+								}),
+						},
+					},
+				},
+			},
+			expected: []InflatedColumn{
+				{
+					Column: &statepb.Column{
+						Build:   "build-1",
+						Started: float64(now * 1000),
+						Hint:    "build-1",
+					},
+					Cells: map[string]Cell{
+						".." + overallRow: {
+							Result: statuspb.TestStatus_PASS,
+							Metrics: map[string]float64{
+								"test-duration-minutes": 10 / 60.0,
+							},
+						},
+						".." + podInfoRow: podInfoPassCell,
+					},
+				},
+			},
+		},
+		{
+			name: "ignore_skip ignored when disabled",
+			group: &configpb.TestGroup{
+				IgnoreSkip: true,
+			},
+			builds: []fakeBuild{
+				{
+					id:      "build-1",
+					podInfo: podInfoSuccess,
+					started: &fakeObject{
+						Data: jsonData(metadata.Started{Timestamp: now}),
+					},
+					finished: &fakeObject{
+						Data: jsonData(metadata.Finished{
+							Timestamp: pint64(now + 10),
+							Passed:    &yes,
+						}),
+					},
+					artifacts: map[string]fakeObject{
+						"junit_context-a_33.xml": {
+							Data: xmlData(
+								junit.Suite{
+									Results: []junit.Result{
+										{
+											Name:    "visible skip non-default msg",
+											Skipped: &junit.Skipped{Message: *pstr("non-default message")},
+										},
+									},
+								}),
+						},
+					},
+				},
+			},
+			expected: []InflatedColumn{
+				{
+					Column: &statepb.Column{
+						Build:   "build-1",
+						Started: float64(now * 1000),
+						Hint:    "build-1",
+					},
+					Cells: map[string]Cell{
+						".." + overallRow: {
+							Result: statuspb.TestStatus_PASS,
+							Metrics: map[string]float64{
+								"test-duration-minutes": 10 / 60.0,
+							},
+						},
+						".." + podInfoRow: podInfoPassCell,
+						"visible skip non-default msg": {
+							Result:  statuspb.TestStatus_PASS_WITH_SKIPS,
+							Icon:    "S",
+							Message: "non-default message",
+						},
+					},
+				},
+			},
+		},
 	}
 
 	poolCtx, poolCancel := context.WithCancel(context.Background())
@@ -1106,7 +1178,10 @@ func TestReadColumns(t *testing.T) {
 			defer cancel()
 			client := fakeClient{
 				Lister: fake.Lister{},
-				Opener: fake.Opener{},
+				Opener: fake.Opener{
+					Paths: map[gcs.Path]fake.Object{},
+					Lock:  &sync.RWMutex{},
+				},
 			}
 
 			builds := addBuilds(&client, path, tc.builds...)
@@ -1141,7 +1216,7 @@ func TestReadColumns(t *testing.T) {
 				readResult = readResultPool
 			}
 
-			readColumns(ctx, client, logrus.WithField("name", tc.name), tc.group, builds, tc.stop, tc.dur, ch, readResult)
+			readColumns(ctx, client, logrus.WithField("name", tc.name), tc.group, builds, tc.stop, tc.dur, ch, readResult, tc.enableIgnoreSkip)
 			close(ch)
 			wg.Wait()
 
@@ -1596,7 +1671,10 @@ func TestReadResult(t *testing.T) {
 			defer cancel()
 			client := fakeClient{
 				Lister: fake.Lister{},
-				Opener: fake.Opener{},
+				Opener: fake.Opener{
+					Paths: map[gcs.Path]fake.Object{},
+					Lock:  &sync.RWMutex{},
+				},
 			}
 
 			fi := fakeIterator{}
@@ -1608,7 +1686,7 @@ func TestReadResult(t *testing.T) {
 				fi.Objects = append(fi.Objects, storage.ObjectAttrs{
 					Name: p.Object(),
 				})
-				client.Opener[*p] = fo
+				client.Opener.Paths[*p] = fo
 			}
 			client.Lister[path] = fi
 
@@ -1778,7 +1856,9 @@ func TestReadSuites(t *testing.T) {
 			defer cancel()
 			client := fakeClient{
 				Lister: fake.Lister{},
-				Opener: fake.Opener{},
+				Opener: fake.Opener{
+					Paths: map[gcs.Path]fake.Object{},
+				},
 			}
 
 			fi := fakeIterator{
@@ -1792,7 +1872,7 @@ func TestReadSuites(t *testing.T) {
 				fi.Objects = append(fi.Objects, storage.ObjectAttrs{
 					Name: p.Object(),
 				})
-				client.Opener[*p] = fo
+				client.Opener.Paths[*p] = fo
 			}
 			client.Lister[path] = fi
 
@@ -1826,6 +1906,10 @@ func TestReadSuites(t *testing.T) {
 }
 
 func addBuilds(fc *fake.Client, path gcs.Path, s ...fakeBuild) []gcs.Build {
+	if fc.Opener.Lock != nil {
+		fc.Opener.Lock.Lock()
+		defer fc.Opener.Lock.Unlock()
+	}
 	var builds []gcs.Build
 	for _, build := range s {
 		buildPath := resolveOrDie(&path, build.id+"/")
@@ -1837,25 +1921,25 @@ func addBuilds(fc *fake.Client, path gcs.Path, s ...fakeBuild) []gcs.Build {
 			fi.Objects = append(fi.Objects, storage.ObjectAttrs{
 				Name: p.Object(),
 			})
-			fc.Opener[*p] = *build.podInfo
+			fc.Opener.Paths[*p] = *build.podInfo
 		}
 		if build.started != nil {
 			p := resolveOrDie(buildPath, "started.json")
 			fi.Objects = append(fi.Objects, storage.ObjectAttrs{
 				Name: p.Object(),
 			})
-			fc.Opener[*p] = *build.started
+			fc.Opener.Paths[*p] = *build.started
 		}
 		if build.finished != nil {
 			p := resolveOrDie(buildPath, "finished.json")
 			fi.Objects = append(fi.Objects, storage.ObjectAttrs{
 				Name: p.Object(),
 			})
-			fc.Opener[*p] = *build.finished
+			fc.Opener.Paths[*p] = *build.finished
 		}
 		if len(build.passed)+len(build.failed) > 0 {
 			p := resolveOrDie(buildPath, "junit_automatic.xml")
-			fc.Opener[*p] = fake.Object{Data: makeJunit(build.passed, build.failed)}
+			fc.Opener.Paths[*p] = fake.Object{Data: makeJunit(build.passed, build.failed)}
 			fi.Objects = append(fi.Objects, storage.ObjectAttrs{
 				Name: p.Object(),
 			})
@@ -1865,7 +1949,7 @@ func addBuilds(fc *fake.Client, path gcs.Path, s ...fakeBuild) []gcs.Build {
 			fi.Objects = append(fi.Objects, storage.ObjectAttrs{
 				Name: p.Object(),
 			})
-			fc.Opener[*p] = fo
+			fc.Opener.Paths[*p] = fo
 		}
 		fc.Lister[*buildPath] = fi
 	}

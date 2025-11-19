@@ -25,10 +25,13 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+
 	configpb "github.com/GoogleCloudPlatform/testgrid/pb/config"
 	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
 )
 
+// TODO(slchase): remove
+// This "eventual consistency" isn't as useful for the utilities that are using Read() or ReadGCS(). Complex cases are handled by the snapshot library.
 var (
 	cache     map[string]Config
 	cacheLock sync.RWMutex
@@ -39,6 +42,7 @@ const cacheRefreshInterval = 5 * time.Minute
 // Config holds a config proto and when it was fetched.
 type Config struct {
 	proto     *configpb.Configuration
+	attrs     *storage.ReaderObjectAttrs
 	lastFetch time.Time
 }
 
@@ -58,28 +62,29 @@ func InitCache() {
 // ReadGCS opens the config at path and unmarshals it into a Configuration proto.
 //
 // If it has been read recently, a cached version will be served.
-func ReadGCS(ctx context.Context, opener gcs.Opener, path gcs.Path) (*configpb.Configuration, error) {
+func ReadGCS(ctx context.Context, opener gcs.Opener, path gcs.Path) (*configpb.Configuration, *storage.ReaderObjectAttrs, error) {
 	cacheLock.Lock()
 	defer cacheLock.Unlock()
 	cfg, ok := cache[path.String()]
 	if ok && time.Since(cfg.lastFetch) < cacheRefreshInterval {
-		return cfg.proto, nil
+		return cfg.proto, cfg.attrs, nil
 	}
 
-	r, _, err := opener.Open(ctx, path)
+	r, attrs, err := opener.Open(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open config: %w", err)
+		return nil, nil, fmt.Errorf("failed to open config: %w", err)
 	}
 	p, err := Unmarshal(r)
 	defer r.Close()
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+		return nil, nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 	cache[path.String()] = Config{
 		proto:     p,
+		attrs:     attrs,
 		lastFetch: time.Now(),
 	}
-	return p, nil
+	return p, attrs, nil
 }
 
 // ReadPath reads the config from the specified local file path.
@@ -100,7 +105,8 @@ func Read(ctx context.Context, path string, client *storage.Client) (*configpb.C
 		if err != nil {
 			return nil, fmt.Errorf("bad path: %v", err)
 		}
-		return ReadGCS(ctx, gcs.NewClient(client), *gcsPath)
+		c, _, err := ReadGCS(ctx, gcs.NewClient(client), *gcsPath)
+		return c, err
 	}
 	return ReadPath(path)
 }

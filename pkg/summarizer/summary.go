@@ -28,6 +28,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,7 @@ import (
 	summarypb "github.com/GoogleCloudPlatform/testgrid/pb/summary"
 	statuspb "github.com/GoogleCloudPlatform/testgrid/pb/test_status"
 	"github.com/GoogleCloudPlatform/testgrid/pkg/tabulator"
+	"github.com/GoogleCloudPlatform/testgrid/util"
 	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
 	"github.com/GoogleCloudPlatform/testgrid/util/metrics"
 	"github.com/golang/protobuf/proto"
@@ -59,6 +61,18 @@ func CreateMetrics(factory metrics.Factory) *Metrics {
 	return &Metrics{
 		Summarize: factory.NewCyclic("summarizer"),
 	}
+}
+
+// FeatureFlags aggregates the knobs to enable/disable certain features.
+type FeatureFlags struct {
+	// controls the acceptable flakiness calculation logic for dashboard tab
+	AllowFuzzyFlakiness bool
+
+	// allows ignoring columns with specific test statuses during summarization
+	AllowIgnoredColumns bool
+
+	// allows enforcing minimum number of runs for a dashboard tab
+	AllowMinNumberOfRuns bool
 }
 
 // gridReader returns the grid content and metadata (last updated time, generation id)
@@ -84,23 +98,35 @@ func lockDashboard(ctx context.Context, client gcs.ConditionalClient, path gcs.P
 // Fixer should adjust the dashboard queue until the context expires.
 type Fixer func(context.Context, *config.DashboardQueue) error
 
+// UpdateOptions aggregates the Update function parameter into a single structure.
+type UpdateOptions struct {
+	ConfigPath        gcs.Path
+	Concurrency       int
+	TabPathPrefix     string
+	SummaryPathPrefix string
+	AllowedDashboards []string
+	Confirm           bool
+	Features          FeatureFlags
+	Freq              time.Duration
+}
+
 // Update summary protos by reading the state protos defined in the config.
 //
 // Will use concurrency go routines to update dashboards in parallel.
 // Setting dashboard will limit update to this dashboard.
 // Will write summary proto when confirm is set.
-func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, configPath gcs.Path, concurrency int, tabPathPrefix, summaryPathPrefix string, allowedDashboards []string, confirm bool, freq time.Duration, fixers ...Fixer) error {
+func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, opts *UpdateOptions, fixers ...Fixer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	if concurrency < 1 {
-		return fmt.Errorf("concurrency must be positive, got: %d", concurrency)
+	if opts.Concurrency < 1 {
+		return fmt.Errorf("concurrency must be positive, got: %d", opts.Concurrency)
 	}
-	log := logrus.WithField("config", configPath)
+	log := logrus.WithField("config", opts.ConfigPath)
 
 	var q config.DashboardQueue
 	var cfg *snapshot.Config
 
-	allowed := stringset.New(allowedDashboards...)
+	allowed := stringset.New(opts.AllowedDashboards...)
 	fixSnapshot := func(newConfig *snapshot.Config) error {
 		baseLog := log
 		log := log.WithField("fixSnapshot()", true)
@@ -111,7 +137,7 @@ func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, co
 		paths := make([]gcs.Path, 0, dashCap)
 		dashboards := make([]*configpb.Dashboard, 0, dashCap)
 		for _, d := range cfg.Dashboards {
-			path, err := summaryPath(configPath, summaryPathPrefix, d.Name)
+			path, err := SummaryPath(opts.ConfigPath, opts.SummaryPathPrefix, d.Name)
 			if err != nil {
 				log.WithError(err).WithField("dashboard", d.Name).Error("Bad dashboard path")
 			}
@@ -128,7 +154,7 @@ func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, co
 			log := log.WithField("path", path)
 			switch {
 			case stat.Attrs != nil:
-				whens[name] = stat.Attrs.Updated.Add(freq)
+				whens[name] = stat.Attrs.Updated.Add(opts.Freq)
 			default:
 				if errors.Is(stat.Err, storage.ErrObjectNotExist) {
 					wg.Add(1)
@@ -153,7 +179,7 @@ func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, co
 
 		wg.Wait()
 
-		q.Init(baseLog, dashboards, time.Now().Add(freq))
+		q.Init(baseLog, dashboards, time.Now().Add(opts.Freq))
 		if err := q.FixAll(whens, false); err != nil {
 			log.WithError(err).Error("Failed to fix all dashboards based on last update time")
 		}
@@ -161,7 +187,7 @@ func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, co
 	}
 
 	log.Debug("Observing config...")
-	cfgChanged, err := snapshot.Observe(ctx, log, client, configPath, time.NewTicker(time.Minute).C)
+	cfgChanged, err := snapshot.Observe(ctx, log, client, opts.ConfigPath, time.NewTicker(time.Minute).C)
 	if err != nil {
 		return fmt.Errorf("observe config: %w", err)
 	}
@@ -239,7 +265,7 @@ func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, co
 		if group == nil {
 			return nil, nil, nil, nil
 		}
-		groupPath, err := tabulator.TabStatePath(configPath, tabPathPrefix, dash, tab.Name)
+		groupPath, err := tabulator.TabStatePath(opts.ConfigPath, opts.TabPathPrefix, dash, tab.Name)
 		if err != nil {
 			return nil, group, nil, err
 		}
@@ -249,7 +275,7 @@ func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, co
 		return groupPath, group, reader, nil
 	}
 
-	tabUpdater := tabUpdatePool(ctx, log, concurrency)
+	tabUpdater := tabUpdatePool(ctx, log, opts.Concurrency, opts.Features)
 
 	updateName := func(log *logrus.Entry, dashName string) (logrus.FieldLogger, bool, error) {
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
@@ -259,11 +285,11 @@ func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, co
 			return log, false, errors.New("dashboard not found")
 		}
 		log.Debug("Summarizing dashboard")
-		summaryPath, err := summaryPath(configPath, summaryPathPrefix, dashName)
+		summaryPath, err := SummaryPath(opts.ConfigPath, opts.SummaryPathPrefix, dashName)
 		if err != nil {
 			return log, false, fmt.Errorf("summary path: %v", err)
 		}
-		sum, _, _, err := readSummary(ctx, client, *summaryPath)
+		sum, _, _, err := ReadSummary(ctx, client, *summaryPath)
 		if err != nil {
 			return log, false, fmt.Errorf("read %q: %v", *summaryPath, err)
 		}
@@ -290,7 +316,7 @@ func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, co
 			"failures":      failures,
 			"healthy-tests": healthyTests,
 		})
-		if !confirm {
+		if !opts.Confirm {
 			return log, more, nil
 		}
 		size, err := writeSummary(ctx, client, *summaryPath, sum)
@@ -302,8 +328,8 @@ func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, co
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(concurrency)
-	for i := 0; i < concurrency; i++ {
+	wg.Add(opts.Concurrency)
+	for i := 0; i < opts.Concurrency; i++ {
 		go func() {
 			defer wg.Done()
 			for dashName := range dashboardNames {
@@ -321,7 +347,7 @@ func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, co
 				finish := mets.Summarize.Start()
 				if log, more, err := updateName(log, dashName); err != nil {
 					finish.Fail()
-					q.Fix(dashName, time.Now().Add(freq/2), false)
+					q.Fix(dashName, time.Now().Add(opts.Freq/2), false)
 					log.WithError(err).Error("Failed to summarize dashboard")
 				} else {
 					finish.Success()
@@ -346,7 +372,7 @@ func Update(ctx context.Context, client gcs.ConditionalClient, mets *Metrics, co
 	defer wg.Wait()
 	defer close(dashboardNames)
 
-	return q.Send(ctx, dashboardNames, freq)
+	return q.Send(ctx, dashboardNames, opts.Freq)
 }
 
 func filterDashboards(dashboards map[string]*configpb.Dashboard, allowed stringset.Set) map[string]*configpb.Dashboard {
@@ -367,7 +393,8 @@ var (
 	normalizer = regexp.MustCompile(`[^a-z0-9]+`)
 )
 
-func summaryPath(g gcs.Path, prefix, dashboard string) (*gcs.Path, error) {
+// SummaryPath generates a summary GCS path for a given dashboard
+func SummaryPath(g gcs.Path, prefix, dashboard string) (*gcs.Path, error) {
 	// ''.join(c for c in n.lower() if c is alphanumeric
 	name := "summary-" + normalizer.ReplaceAllString(strings.ToLower(dashboard), "")
 	fullName := path.Join(prefix, name)
@@ -385,7 +412,10 @@ func summaryPath(g gcs.Path, prefix, dashboard string) (*gcs.Path, error) {
 	return np, nil
 }
 
-func readSummary(ctx context.Context, client gcs.Client, path gcs.Path) (*summarypb.DashboardSummary, time.Time, int64, error) {
+// ReadSummary provides the dashboard summary as defined in summary.proto.
+// IMPORTANT: Returns nil if the object doesn't exist.
+// Returns an error iff wasn't read or serialized properly.
+func ReadSummary(ctx context.Context, client gcs.Client, path gcs.Path) (*summarypb.DashboardSummary, time.Time, int64, error) {
 	r, modified, gen, err := pathReader(ctx, client, path)
 	if errors.Is(err, storage.ErrObjectNotExist) {
 		return nil, time.Time{}, 0, nil
@@ -599,7 +629,7 @@ type tabUpdater struct {
 	update func(context.Context, *configpb.DashboardTab, *configpb.TestGroup, gridReader) func() (*summarypb.DashboardTabSummary, error)
 }
 
-func tabUpdatePool(poolCtx context.Context, log *logrus.Entry, concurrency int) *tabUpdater {
+func tabUpdatePool(poolCtx context.Context, log *logrus.Entry, concurrency int, features FeatureFlags) *tabUpdater {
 	type request struct {
 		ctx   context.Context
 		tab   *configpb.DashboardTab
@@ -621,7 +651,7 @@ func tabUpdatePool(poolCtx context.Context, log *logrus.Entry, concurrency int) 
 		go func() {
 			defer wg.Done()
 			for req := range ch {
-				req.sum, req.err = updateTab(req.ctx, req.tab, req.group, req.read)
+				req.sum, req.err = updateTab(req.ctx, req.tab, req.group, req.read, features)
 				req.wg.Done()
 			}
 		}()
@@ -668,7 +698,7 @@ func staleHours(tab *configpb.DashboardTab) time.Duration {
 }
 
 // updateTab reads the latest grid state for the tab and summarizes it.
-func updateTab(ctx context.Context, tab *configpb.DashboardTab, group *configpb.TestGroup, groupReader gridReader) (*summarypb.DashboardTabSummary, error) {
+func updateTab(ctx context.Context, tab *configpb.DashboardTab, group *configpb.TestGroup, groupReader gridReader, features FeatureFlags) (*summarypb.DashboardTabSummary, error) {
 	groupName := tab.TestGroupName
 	grid, mod, _, err := readGrid(ctx, groupReader) // TODO(fejta): track gen
 	if err != nil {
@@ -686,28 +716,29 @@ func updateTab(ctx context.Context, tab *configpb.DashboardTab, group *configpb.
 	}
 
 	recent := recentColumns(tab, group)
-	grid.Rows, err = filterGrid(tab.BaseOptions, grid.Rows, recent)
-	if err != nil {
-		return nil, fmt.Errorf("filter: %v", err)
-	}
+	grid.Rows = recentRows(grid.Rows, recent)
+
+	grid.Rows = filterMethods(grid.Rows)
 
 	latest, latestSeconds := latestRun(grid.Columns)
-	alert := staleAlert(mod, latest, staleHours(tab))
-	// TODO(chases2): Determine alerts (updater.alertRows) again; the pass/fail thresholds may be different on tabs
-	failures := failingTestSummaries(grid.Rows)
-	passingCols, completedCols, passingCells, filledCells, brokenState := gridMetrics(len(grid.Columns), grid.Rows, recent, tab.BrokenColumnThreshold)
+	alert := staleAlert(mod, latest, staleHours(tab), len(grid.Rows))
+	failures := failingTestSummaries(grid.Rows, tab.GetOpenTestTemplate(), group.GetGcsPrefix(), group.GetColumnHeader())
+	colsCells, brokenState := gridMetrics(len(grid.Columns), grid.Rows, recent, tab.BrokenColumnThreshold, features, tab.GetStatusCustomizationOptions())
+	metrics := tabMetrics(colsCells)
+	tabStatus := overallStatus(grid, recent, alert, brokenState, failures, features, colsCells, tab.GetStatusCustomizationOptions())
 	return &summarypb.DashboardTabSummary{
 		DashboardTabName:     tab.Name,
 		LastUpdateTimestamp:  float64(mod.Unix()),
 		LastRunTimestamp:     float64(latestSeconds),
 		Alert:                alert,
 		FailingTestSummaries: failures,
-		OverallStatus:        overallStatus(grid, recent, alert, brokenState, failures),
-		Status:               statusMessage(passingCols, completedCols, passingCells, filledCells),
+		OverallStatus:        tabStatus,
+		Status:               statusMessage(colsCells, tabStatus, tab.GetStatusCustomizationOptions()),
 		LatestGreen:          latestGreen(grid, group.UseKubernetesClient),
 		BugUrl:               tab.GetOpenBugTemplate().GetUrl(),
 		Healthiness:          healthiness,
 		LinkedIssues:         allLinkedIssues(grid.Rows),
+		SummaryMetrics:       metrics,
 	}, nil
 }
 
@@ -749,43 +780,6 @@ func firstFilled(values ...int32) int {
 	return 0
 }
 
-const (
-	includeFilter = "include-filter-by-regex"
-	excludeFilter = "exclude-filter-by-regex"
-	// TODO(fejta): others, which are not used by testgrid.k8s.io
-)
-
-// filterGrid truncates the grid to rows with recent results and matching the white/blacklist.
-func filterGrid(baseOptions string, rows []*statepb.Row, recent int) ([]*statepb.Row, error) {
-
-	vals, err := url.ParseQuery(baseOptions)
-	if err != nil {
-		return nil, fmt.Errorf("parse %q: %v", baseOptions, err)
-	}
-
-	rows = recentRows(rows, recent)
-
-	rows = filterMethods(rows)
-
-	for _, include := range vals[includeFilter] {
-		if rows, err = includeRows(rows, include); err != nil {
-			return nil, fmt.Errorf("bad %s=%s: %v", includeFilter, include, err)
-		}
-	}
-
-	for _, exclude := range vals[excludeFilter] {
-		if rows, err = excludeRows(rows, exclude); err != nil {
-			return nil, fmt.Errorf("bad %s=%s: %v", excludeFilter, exclude, err)
-		}
-	}
-
-	// TODO(fejta): grouping, which is not used by testgrid.k8s.io
-	// TODO(fejta): sorting, unused by testgrid.k8s.io
-	// TODO(fejta): graph, unused by testgrid.k8s.io
-	// TODO(fejta): tabuluar, unused by testgrid.k8s.io
-	return rows, nil
-}
-
 // recentRows returns the subset of rows with at least one recent result
 func recentRows(in []*statepb.Row, recent int) []*statepb.Row {
 	var rows []*statepb.Row
@@ -813,38 +807,6 @@ func filterMethods(rows []*statepb.Row) []*statepb.Row {
 	return filtered
 }
 
-// includeRows returns the subset of rows that match the regex
-func includeRows(in []*statepb.Row, include string) ([]*statepb.Row, error) {
-	re, err := regexp.Compile(include)
-	if err != nil {
-		return nil, err
-	}
-	var rows []*statepb.Row
-	for _, r := range in {
-		if !re.MatchString(r.Name) {
-			continue
-		}
-		rows = append(rows, r)
-	}
-	return rows, nil
-}
-
-// excludeRows returns the subset of rows that do not match the regex
-func excludeRows(in []*statepb.Row, exclude string) ([]*statepb.Row, error) {
-	re, err := regexp.Compile(exclude)
-	if err != nil {
-		return nil, err
-	}
-	var rows []*statepb.Row
-	for _, r := range in {
-		if re.MatchString(r.Name) {
-			continue
-		}
-		rows = append(rows, r)
-	}
-	return rows, nil
-}
-
 // latestRun returns the Time (and seconds-since-epoch) of the most recent run.
 func latestRun(columns []*statepb.Column) (time.Time, int64) {
 	if len(columns) > 0 {
@@ -860,14 +822,14 @@ func latestRun(columns []*statepb.Column) (time.Time, int64) {
 const noRuns = "no completed results"
 
 // staleAlert returns an explanatory message if the latest results are stale.
-func staleAlert(mod, ran time.Time, stale time.Duration) string {
+func staleAlert(mod, ran time.Time, stale time.Duration, rows int) string {
 	if mod.IsZero() {
 		return "no stored results"
 	}
 	if stale == 0 {
 		return ""
 	}
-	if ran.IsZero() {
+	if ran.IsZero() || rows == 0 { // Has no columns and/or no rows.
 		return noRuns
 	}
 	now := time.Now()
@@ -881,7 +843,7 @@ func staleAlert(mod, ran time.Time, stale time.Duration) string {
 }
 
 // failingTestSummaries returns details for every row with an active alert.
-func failingTestSummaries(rows []*statepb.Row) []*summarypb.FailingTestSummary {
+func failingTestSummaries(rows []*statepb.Row, template *configpb.LinkTemplate, gcsPrefix string, columnHeader []*configpb.TestGroup_ColumnHeader) []*summarypb.FailingTestSummary {
 	var failures []*summarypb.FailingTestSummary
 	for _, row := range rows {
 		if row.AlertInfo == nil {
@@ -897,21 +859,45 @@ func failingTestSummaries(rows []*statepb.Row) []*summarypb.FailingTestSummary {
 			FailureMessage:    alert.FailureMessage,
 			PassBuildId:       alert.PassBuildId,
 			// TODO(fejta): better build info
-			BuildLink:          alert.BuildLink,
-			BuildLinkText:      alert.BuildLinkText,
-			BuildUrlText:       alert.BuildUrlText,
-			LinkedBugs:         row.Issues,
-			FailTestLink:       buildFailLink(alert.FailTestId, row.Id),
-			LatestFailTestLink: buildFailLink(alert.LatestFailTestId, row.Id),
-			Properties:         alert.Properties,
-			HotlistIds:         alert.HotlistIds,
-			EmailAddresses:     alert.EmailAddresses,
+			BuildLink:           alert.BuildLink,
+			BuildLinkText:       alert.BuildLinkText,
+			BuildUrlText:        alert.BuildUrlText,
+			LinkedBugs:          row.Issues,
+			FailTestLink:        buildFailLink(alert.FailTestId, row.Id),
+			LatestFailTestLink:  buildFailLink(alert.LatestFailTestId, row.Id),
+			Properties:          alert.Properties,
+			CustomColumnHeaders: alert.CustomColumnHeaders,
+			HotlistIds:          alert.HotlistIds,
+			EmailAddresses:      alert.EmailAddresses,
 		}
 		if alert.PassTime != nil {
 			sum.PassTimestamp = float64(alert.PassTime.Seconds)
 		}
 		if alert.FailTime != nil {
 			sum.FailTimestamp = float64(alert.FailTime.Seconds)
+		}
+
+		propertyToColumnHeader := make(map[string]string)
+		for i := 0; i < len(columnHeader); i++ {
+			if columnHeader[i].Label != "" {
+				propertyToColumnHeader["<custom-"+strconv.Itoa(i)+">"] = columnHeader[i].Label
+			} else if columnHeader[i].Property != "" {
+				propertyToColumnHeader["<custom-"+strconv.Itoa(i)+">"] = columnHeader[i].Property
+			} else {
+				propertyToColumnHeader["<custom-"+strconv.Itoa(i)+">"] = columnHeader[i].ConfigurationValue
+			}
+		}
+
+		// Verify what the links for alerts would be with the new method.
+		failLink := testResultLink(template, alert.GetProperties(), alert.GetFailTestId(), row.GetId(), alert.GetFailBuildId(), gcsPrefix, propertyToColumnHeader, alert.CustomColumnHeaders)
+		latestFailLink := testResultLink(template, alert.GetProperties(), alert.GetLatestFailTestId(), row.GetId(), alert.GetLatestFailBuildId(), gcsPrefix, propertyToColumnHeader, alert.CustomColumnHeaders)
+		log := logrus.WithField("failLink", failLink).WithField("latestFailLink", latestFailLink)
+		if failLink == "" || latestFailLink == "" {
+			log.Warning("Failed to create failure link.")
+		} else if !strings.HasPrefix(failLink, "http") || !strings.HasPrefix(latestFailLink, "http") {
+			log.Warning("Failure link does not include scheme.")
+		} else {
+			log.Info("Created failure links.")
 		}
 
 		failures = append(failures, &sum)
@@ -925,15 +911,62 @@ func buildFailLink(testID, target string) string {
 	return fmt.Sprintf("%s %s", url.PathEscape(testID), url.PathEscape(target))
 }
 
+func testResultLink(template *configpb.LinkTemplate, properties map[string]string, testID, target, buildID, gcsPrefix string, propertyToColumnHeader map[string]string, customColumnHeaders map[string]string) string {
+	// Return the result of open_test_template for the tab.
+	// This assumes that open_test_template uses a limited set of tokens (since it's not in the context of a browser).
+	// Assume that the following are valid: <gcs_prefix>, <test-name>, <workflow-id>, <workflow-name>, <test-id>, <build ID>
+	// TODO: Ensure workflow-id, workflow-name are added in alerts.
+	tokens := util.Tokens(template)
+	parameters := map[string]string{}
+	for _, token := range tokens {
+		switch token {
+		case util.GcsPrefix:
+			parameters[util.GcsPrefix] = gcsPrefix
+		case util.TestName:
+			parameters[util.TestName] = target
+		case util.WorkflowID:
+			if workflowID, ok := properties["workflow-id"]; ok {
+				parameters[util.WorkflowID] = workflowID
+			}
+		case util.WorkflowName:
+			if WorkflowName, ok := properties["workflow-name"]; ok {
+				parameters[util.WorkflowName] = WorkflowName
+			}
+		case util.TestID:
+			parameters[util.TestID] = testID
+		case util.BuildID:
+			parameters[util.BuildID] = buildID
+		case util.CustomColumnRe.FindString(token):
+			if v, ok := customColumnHeaders[propertyToColumnHeader[token]]; ok {
+				parameters[token] = v
+			}
+		default:
+			// Didn't match any simple tokens, check if it's a property.
+			trimmedToken := strings.NewReplacer("<", "", ">", "").Replace(token)
+			if v, ok := properties[trimmedToken]; ok {
+				parameters[token] = v
+			}
+		}
+	}
+	link, err := util.ExpandTemplate(template, parameters)
+	if err != nil {
+		logrus.WithError(err).WithField("template", template).WithField("parameters", parameters).Error("Error expanding link template.")
+		return ""
+	}
+	return link
+}
+
 // overallStatus determines whether the tab is stale, failing, flaky or healthy.
 //
 // Tabs are:
 // BROKEN - called with brokenState (typically when most rows are red)
 // STALE - called with a stale mstring (typically when most recent column is old)
 // FAIL - there is at least one alert
+// ACCEPTABLE - the ratio of (valid) failing to total columns is less than configured threshold
 // FLAKY - at least one recent column has failing cells
+// PENDING - number of valid columns is less than minimum # of runs required
 // PASS - all recent columns are entirely green
-func overallStatus(grid *statepb.Grid, recent int, stale string, brokenState bool, alerts []*summarypb.FailingTestSummary) summarypb.DashboardTabSummary_TabStatus {
+func overallStatus(grid *statepb.Grid, recent int, stale string, brokenState bool, alerts []*summarypb.FailingTestSummary, features FeatureFlags, colCells gridStats, opts *configpb.DashboardTabStatusCustomizationOptions) summarypb.DashboardTabSummary_TabStatus {
 	if brokenState {
 		return summarypb.DashboardTabSummary_BROKEN
 	}
@@ -943,21 +976,25 @@ func overallStatus(grid *statepb.Grid, recent int, stale string, brokenState boo
 	if len(alerts) > 0 {
 		return summarypb.DashboardTabSummary_FAIL
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// safeguard PENDING status behind a flag
+	if features.AllowMinNumberOfRuns && opts.GetMinAcceptableRuns() > int32(colCells.completedCols-colCells.ignoredCols) {
+		return summarypb.DashboardTabSummary_PENDING
+	}
 
-	results := results(ctx, grid.Rows)
+	results := result.Map(grid.Rows)
 	moreCols := true
-	var found bool
+	var passing bool
+	var flaky bool
 	// We want to look at recent columns, skipping over any that are still running.
 	for moreCols && recent > 0 {
 		moreCols = false
 		var foundCol bool
 		var running bool
+		var ignored bool
 		// One result off each column since we don't know which
 		// cells are running ahead of time.
-		for _, resultCh := range results {
-			r, ok := <-resultCh
+		for _, resultF := range results {
+			r, ok := resultF()
 			if !ok {
 				continue
 			}
@@ -968,13 +1005,18 @@ func overallStatus(grid *statepb.Grid, recent int, stale string, brokenState boo
 				// result off every row's channel.
 				continue
 			}
+			if features.AllowIgnoredColumns && result.Ignored(r, opts) {
+				ignored = true
+				continue
+			}
 			r = coalesceResult(r, result.IgnoreRunning)
 			if r == statuspb.TestStatus_NO_RESULT {
 				continue
 			}
 			// any failure in a recent column results in flaky
 			if r != statuspb.TestStatus_PASS {
-				return summarypb.DashboardTabSummary_FLAKY
+				flaky = true
+				continue
 			}
 			foundCol = true
 		}
@@ -985,16 +1027,42 @@ func overallStatus(grid *statepb.Grid, recent int, stale string, brokenState boo
 			continue
 		}
 
-		if foundCol {
-			found = true
+		// Ignored columns are ignored from tab status but they do count as recent
+		// Failures in this col are ignored too
+		if ignored {
 			recent--
+			flaky = false
+			continue
 		}
 
+		if flaky {
+			if isAcceptable(colCells, opts, features) {
+				return summarypb.DashboardTabSummary_ACCEPTABLE
+			}
+			return summarypb.DashboardTabSummary_FLAKY
+		}
+
+		if foundCol {
+			passing = true
+			recent--
+		}
 	}
-	if found {
+
+	if passing {
 		return summarypb.DashboardTabSummary_PASS
 	}
 	return summarypb.DashboardTabSummary_UNKNOWN
+}
+
+// isAcceptable determines if the flakiness is within acceptable range.
+// Return true iff the feature is enabled, `max_acceptable_flakiness` is set and flakiness is < than configured.
+func isAcceptable(colCells gridStats, opts *configpb.DashboardTabStatusCustomizationOptions, features FeatureFlags) bool {
+	if features.AllowFuzzyFlakiness && opts.GetMaxAcceptableFlakiness() > 0 &&
+		100*float64(colCells.passingCols)/float64(colCells.completedCols-colCells.ignoredCols) >= float64(100-opts.GetMaxAcceptableFlakiness()) {
+		return true
+	}
+
+	return false
 }
 
 func allLinkedIssues(rows []*statepb.Row) []string {
@@ -1011,16 +1079,23 @@ func allLinkedIssues(rows []*statepb.Row) []string {
 	return linkedIssues
 }
 
-// Culminate set of metrics related to a section of the Grid
-func gridMetrics(cols int, rows []*statepb.Row, recent int, brokenThreshold float32) (int, int, int, int, bool) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// gridStats aggregates columnar and cellular metrics as a struct
+type gridStats struct {
+	passingCols   int
+	completedCols int
+	ignoredCols   int
+	passingCells  int
+	filledCells   int
+}
 
-	results := results(ctx, rows)
+// Culminate set of metrics related to a section of the Grid
+func gridMetrics(cols int, rows []*statepb.Row, recent int, brokenThreshold float32, features FeatureFlags, opts *configpb.DashboardTabStatusCustomizationOptions) (gridStats, bool) {
+	results := result.Map(rows)
 	var passingCells int
 	var filledCells int
 	var passingCols int
 	var completedCols int
+	var ignoredCols int
 	var brokenState bool
 
 	for idx := 0; idx < cols; idx++ {
@@ -1029,10 +1104,17 @@ func gridMetrics(cols int, rows []*statepb.Row, recent int, brokenThreshold floa
 		}
 		var passes int
 		var failures int
+		var ignores int
 		var other int
-		for _, ch := range results {
+		for _, iter := range results {
 			// TODO(fejta): fail old running cols
-			status := coalesceResult(<-ch, result.IgnoreRunning)
+			r, _ := iter()
+			// check for ignores first
+			if features.AllowIgnoredColumns && result.Ignored(r, opts) {
+				ignores++
+			}
+			// proceed with the rest of calculations
+			status := coalesceResult(r, result.IgnoreRunning)
 			if result.Passing(status) {
 				passes++
 				passingCells++
@@ -1049,7 +1131,10 @@ func gridMetrics(cols int, rows []*statepb.Row, recent int, brokenThreshold floa
 		if passes+failures+other > 0 {
 			completedCols++
 		}
-		if failures == 0 && passes > 0 {
+		// only one of those can be true
+		if ignores > 0 {
+			ignoredCols++
+		} else if failures == 0 && passes > 0 {
 			passingCols++
 		}
 
@@ -1060,21 +1145,52 @@ func gridMetrics(cols int, rows []*statepb.Row, recent int, brokenThreshold floa
 		}
 	}
 
-	return passingCols, completedCols, passingCells, filledCells, brokenState
+	metrics := gridStats{
+		passingCols:   passingCols,
+		completedCols: completedCols,
+		ignoredCols:   ignoredCols,
+		passingCells:  passingCells,
+		filledCells:   filledCells,
+	}
+
+	return metrics, brokenState
 }
 
-func fmtStatus(passCols, cols, passCells, cells int) string {
-	colCent := 100 * float64(passCols) / float64(cols)
-	cellCent := 100 * float64(passCells) / float64(cells)
-	return fmt.Sprintf("%d of %d (%.1f%%) recent columns passed (%d of %d or %.1f%% cells)", passCols, cols, colCent, passCells, cells, cellCent)
+// Add a subset of colCellMetrics to summary proto
+func tabMetrics(colCells gridStats) *summarypb.DashboardTabSummaryMetrics {
+	return &summarypb.DashboardTabSummaryMetrics{
+		PassingColumns:   int32(colCells.passingCols),
+		CompletedColumns: int32(colCells.completedCols),
+		IgnoredColumns:   int32(colCells.ignoredCols),
+	}
 }
 
-//  2483 of 115784 tests (2.1%) and 163 of 164 runs (99.4%) failed in the past 7 days
-func statusMessage(passingCols, completedCols, passingCells, filledCells int) string {
-	if filledCells == 0 {
+func fmtStatus(colCells gridStats, tabStatus summarypb.DashboardTabSummary_TabStatus, opts *configpb.DashboardTabStatusCustomizationOptions) string {
+	colCent := 100 * float64(colCells.passingCols) / float64(colCells.completedCols)
+	cellCent := 100 * float64(colCells.passingCells) / float64(colCells.filledCells)
+	flakyCent := 100 * float64(colCells.completedCols-colCells.ignoredCols-colCells.passingCols) / float64(colCells.completedCols-colCells.ignoredCols)
+	// put tab stats on a single line and additional status info on the next
+	statusMsg := fmt.Sprintf("Tab stats: %d of %d (%.1f%%) recent columns passed (%d of %d or %.1f%% cells)", colCells.passingCols, colCells.completedCols, colCent, colCells.passingCells, colCells.filledCells, cellCent)
+	if colCells.ignoredCols > 0 {
+		statusMsg += fmt.Sprintf(". %d columns ignored", colCells.ignoredCols)
+	}
+	// add status info message for certain cases
+	if tabStatus == summarypb.DashboardTabSummary_PENDING {
+		statusMsg += "\nStatus info: Not enough runs"
+	} else if tabStatus == summarypb.DashboardTabSummary_ACCEPTABLE {
+		statusMsg += fmt.Sprintf("\nStatus info: Recent flakiness (%.1f%%) over valid columns is within configured acceptable level of %.1f%%.", flakyCent, opts.GetMaxAcceptableFlakiness())
+	}
+	return statusMsg
+}
+
+// Tab stats: 3 out of 5 (60.0%) recent columns passed (35 of 50 or 70.0% cells). 1 columns ignored.
+// (OPTIONAL) Status info: Recent flakiness (40.0%) flakiness is within configured acceptable level of X
+// OR Status info: Not enough runs
+func statusMessage(colCells gridStats, tabStatus summarypb.DashboardTabSummary_TabStatus, opts *configpb.DashboardTabStatusCustomizationOptions) string {
+	if colCells.filledCells == 0 {
 		return noRuns
 	}
-	return fmtStatus(passingCols, completedCols, passingCells, filledCells)
+	return fmtStatus(colCells, tabStatus, opts)
 }
 
 const noGreens = "no recent greens"
@@ -1083,14 +1199,13 @@ const noGreens = "no recent greens"
 //
 // Returns the build, first extra column header and/or a no recent greens message.
 func latestGreen(grid *statepb.Grid, useFirstExtra bool) string {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	results := results(ctx, grid.Rows)
+	results := result.Map(grid.Rows)
 	for _, col := range grid.Columns {
 		var failures bool
 		var passes bool
-		for _, resultCh := range results {
-			result := coalesceResult(<-resultCh, result.ShowRunning)
+		for _, resultF := range results {
+			r, _ := resultF()
+			result := coalesceResult(r, result.ShowRunning)
 			if result == statuspb.TestStatus_PASS {
 				passes = true
 			}
@@ -1142,14 +1257,4 @@ func shouldRunHealthiness(tab *configpb.DashboardTab) bool {
 // coalesceResult reduces the result to PASS, NO_RESULT, FAIL or FLAKY.
 func coalesceResult(rowResult statuspb.TestStatus, ignoreRunning bool) statuspb.TestStatus {
 	return result.Coalesce(rowResult, ignoreRunning)
-}
-
-// resultIter returns a channel that outputs the result for each column, decoding the run-length-encoding.
-func resultIter(ctx context.Context, results []int32) <-chan statuspb.TestStatus {
-	return result.Iter(ctx, results)
-}
-
-// results returns a per-column result output channel for each row.
-func results(ctx context.Context, rows []*statepb.Row) map[string]<-chan statuspb.TestStatus {
-	return result.Map(ctx, rows)
 }

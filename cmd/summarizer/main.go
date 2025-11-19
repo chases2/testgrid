@@ -42,10 +42,11 @@ type options struct {
 	dashboards        util.Strings
 	concurrency       int
 	wait              time.Duration
-	gridPathPrefix    string // TODO(fejta): remove
 	summaryPathPrefix string
 	pubsub            string
 	tabPathPrefix     string
+
+	features summarizer.FeatureFlags
 
 	debug    bool
 	trace    bool
@@ -71,10 +72,12 @@ func gatherOptions() options {
 	flag.Var(&o.dashboards, "dashboard", "Only update named dashboards if set (repeateable)")
 	flag.IntVar(&o.concurrency, "concurrency", 0, "Manually define the number of dashboards to concurrently update if non-zero")
 	flag.DurationVar(&o.wait, "wait", 0, "Ensure at least this much time has passed since the last loop (exit if zero).")
-	flag.StringVar(&o.gridPathPrefix, "grid-path", "grid", "Deprecated, stop using")
 	flag.StringVar(&o.summaryPathPrefix, "summary-path", "summary", "Write summaries under this GCS path.")
 	flag.StringVar(&o.pubsub, "pubsub", "", "listen for test group updates at project/subscription")
 	flag.StringVar(&o.tabPathPrefix, "tab-path", "tabs", "Read from tab state instead of test group")
+	flag.BoolVar(&o.features.AllowFuzzyFlakiness, "allow-fuzzy-flakiness", false, "Enable the functionality of further classifying flaky tabs (acceptable or not).")
+	flag.BoolVar(&o.features.AllowIgnoredColumns, "allow-ignored-columns", false, "Enable the functionality to ignore columns with specific test statuses during summarization.")
+	flag.BoolVar(&o.features.AllowMinNumberOfRuns, "allow-min-num-runs", false, "Enable the functionality to enforce a min limit to test runs.")
 
 	flag.BoolVar(&o.debug, "debug", false, "Log debug lines if set")
 	flag.BoolVar(&o.trace, "trace", false, "Log trace and debug lines if set")
@@ -84,7 +87,7 @@ func gatherOptions() options {
 	return o
 }
 
-func gcsFixer(ctx context.Context, projectSub string, configPath gcs.Path, gridPrefix, tabPrefix, credPath string) (summarizer.Fixer, error) {
+func gcsFixer(ctx context.Context, projectSub string, configPath gcs.Path, tabPrefix, credPath string) (summarizer.Fixer, error) {
 	if projectSub == "" {
 		return nil, nil
 	}
@@ -98,7 +101,7 @@ func gcsFixer(ctx context.Context, projectSub string, configPath gcs.Path, gridP
 		logrus.WithError(err).Fatal("Failed to create pubsub client")
 	}
 	client := pubsub.NewClient(pubsubClient)
-	return summarizer.FixGCS(client, logrus.StandardLogger(), projID, subID, configPath, gridPrefix, tabPrefix)
+	return summarizer.FixGCS(client, logrus.StandardLogger(), projID, subID, configPath, tabPrefix)
 }
 
 func main() {
@@ -132,7 +135,7 @@ func main() {
 
 	client := gcs.NewClient(storageClient)
 	metrics := summarizer.CreateMetrics(prometheus.NewFactory())
-	fixer, err := gcsFixer(ctx, opt.pubsub, opt.config, opt.gridPathPrefix, opt.tabPathPrefix, opt.creds)
+	fixer, err := gcsFixer(ctx, opt.pubsub, opt.config, opt.tabPathPrefix, opt.creds)
 	if err != nil {
 		logrus.WithError(err).WithField("subscription", opt.pubsub).Fatal("Failed to configure pubsub")
 	}
@@ -148,7 +151,18 @@ func main() {
 		fixers = append(fixers, summarizer.FixPersistent(log, client, path, ticker.C))
 	}
 
-	if err := summarizer.Update(ctx, client, metrics, opt.config, opt.concurrency, opt.tabPathPrefix, opt.summaryPathPrefix, opt.dashboards.Strings(), opt.confirm, opt.wait, fixers...); err != nil {
+	opts := &summarizer.UpdateOptions{
+		ConfigPath:        opt.config,
+		Concurrency:       opt.concurrency,
+		TabPathPrefix:     opt.tabPathPrefix,
+		SummaryPathPrefix: opt.summaryPathPrefix,
+		AllowedDashboards: opt.dashboards.Strings(),
+		Confirm:           opt.confirm,
+		Features:          opt.features,
+		Freq:              opt.wait,
+	}
+
+	if err := summarizer.Update(ctx, client, metrics, opts, fixers...); err != nil {
 		logrus.WithError(err).Error("Could not summarize")
 	}
 }

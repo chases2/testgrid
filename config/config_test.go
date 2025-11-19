@@ -458,6 +458,254 @@ func TestValidateName(t *testing.T) {
 	}
 }
 
+func TestValidateResultStoreSource(t *testing.T) {
+	tests := []struct {
+		name string
+		tg   *configpb.TestGroup
+		err  bool
+	}{
+		{
+			name: "nil test group",
+			tg:   nil,
+			err:  false,
+		},
+		{
+			name: "empty test group",
+			tg:   &configpb.TestGroup{},
+			err:  false,
+		},
+		{
+			name: "empty ResultStore source",
+			tg: &configpb.TestGroup{
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_ResultstoreConfig{
+						ResultstoreConfig: &configpb.ResultStoreConfig{},
+					},
+				},
+			},
+			err: true,
+		},
+		{
+			name: "basically works",
+			tg: &configpb.TestGroup{
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_ResultstoreConfig{
+						ResultstoreConfig: &configpb.ResultStoreConfig{
+							Project: "my-project",
+						},
+					},
+				},
+			},
+			err: false,
+		},
+		{
+			name: "valid query",
+			tg: &configpb.TestGroup{
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_ResultstoreConfig{
+						ResultstoreConfig: &configpb.ResultStoreConfig{
+							Project: "my-project",
+							Query:   `target:"my-job"`,
+						},
+					},
+				},
+			},
+			err: false,
+		},
+		{
+			name: "invalid query",
+			tg: &configpb.TestGroup{
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_ResultstoreConfig{
+						ResultstoreConfig: &configpb.ResultStoreConfig{
+							Project: "my-project",
+							Query:   `label:foo bar`,
+						},
+					},
+				},
+			},
+			err: true,
+		},
+		{
+			name: "query without project",
+			tg: &configpb.TestGroup{
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_ResultstoreConfig{
+						ResultstoreConfig: &configpb.ResultStoreConfig{
+							Query: `target:"my-job"`,
+						},
+					},
+				},
+			},
+			err: true,
+		},
+		{
+			name: "gcs_prefix and ResultStore defined",
+			tg: &configpb.TestGroup{
+				GcsPrefix: "/my-bucket/logs",
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_ResultstoreConfig{
+						ResultstoreConfig: &configpb.ResultStoreConfig{
+							Project: "my-project",
+						},
+					},
+				},
+			},
+			err: true,
+		},
+		{
+			name: "use_kubernetes_client and ResultStore defined",
+			tg: &configpb.TestGroup{
+				UseKubernetesClient: true,
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_ResultstoreConfig{
+						ResultstoreConfig: &configpb.ResultStoreConfig{
+							Project: "my-project",
+						},
+					},
+				},
+			},
+			err: true,
+		},
+		{
+			name: "other result source defined",
+			tg: &configpb.TestGroup{
+				GcsPrefix:           "/my-bucket/logs",
+				UseKubernetesClient: true,
+			},
+			err: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateResultStoreSource(test.tg)
+			if err != nil && !test.err {
+				t.Errorf("validateResultStoreSource(%v) errored unexpectedly: %v", test.tg, err)
+			} else if err == nil && test.err {
+				t.Errorf("validateResultStoreSource(%v) did not error as expected", test.tg)
+			}
+		})
+	}
+}
+
+func TestValidateGCSSource(t *testing.T) {
+	tests := []struct {
+		name string
+		tg   *configpb.TestGroup
+		err  bool
+	}{
+		{
+			name: "nil test group",
+			tg:   nil,
+			err:  false,
+		},
+		{
+			name: "empty test group",
+			tg:   &configpb.TestGroup{},
+			err:  false,
+		},
+		{
+			name: "empty GCS source",
+			tg: &configpb.TestGroup{
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_GcsConfig{
+						GcsConfig: &configpb.GCSConfig{},
+					},
+				},
+			},
+			err: true,
+		},
+		{
+			name: "basically works",
+			tg: &configpb.TestGroup{
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_GcsConfig{
+						GcsConfig: &configpb.GCSConfig{
+							GcsPrefix: "/my-bucket/logs",
+						},
+					},
+				},
+			},
+			err: false,
+		},
+		{
+			name: "gcs_prefix and GCS config defined",
+			tg: &configpb.TestGroup{
+				GcsPrefix: "/my-bucket/logs",
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_GcsConfig{
+						GcsConfig: &configpb.GCSConfig{
+							GcsPrefix: "/my-bucket/logs",
+						},
+					},
+				},
+			},
+			err: true,
+		},
+		{
+			name: "use_kubernetes_client and GCS config defined",
+			tg: &configpb.TestGroup{
+				UseKubernetesClient: true,
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_GcsConfig{
+						GcsConfig: &configpb.GCSConfig{
+							GcsPrefix: "/my-bucket/logs",
+						},
+					},
+				},
+			},
+			err: true,
+		},
+		{
+			name: "other result source defined",
+			tg: &configpb.TestGroup{
+				GcsPrefix:           "/my-bucket/logs",
+				UseKubernetesClient: true,
+			},
+			err: false,
+		},
+		{
+			name: "GCS config with pubsub",
+			tg: &configpb.TestGroup{
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_GcsConfig{
+						GcsConfig: &configpb.GCSConfig{
+							GcsPrefix:          "/my-bucket/logs",
+							PubsubProject:      "my-project",
+							PubsubSubscription: "my-gcs-notifications",
+						},
+					},
+				},
+			},
+			err: false,
+		},
+		{
+			name: "GCS config with partial pubsub",
+			tg: &configpb.TestGroup{
+				ResultSource: &configpb.TestGroup_ResultSource{
+					ResultSourceConfig: &configpb.TestGroup_ResultSource_GcsConfig{
+						GcsConfig: &configpb.GCSConfig{
+							GcsPrefix:     "/my-bucket/logs",
+							PubsubProject: "my-project",
+						},
+					},
+				},
+			},
+			err: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateGCSSource(test.tg)
+			if err != nil && !test.err {
+				t.Errorf("validateGCSSource(%v) errored unexpectedly: %v", test.tg, err)
+			} else if err == nil && test.err {
+				t.Errorf("validateGCSSource(%v) did not error as expected", test.tg)
+			}
+		})
+	}
+}
+
 func TestValidateTestGroup(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -770,6 +1018,98 @@ func TestValidateTestGroup(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "basic test metadata options",
+			pass: true,
+			testGroup: &configpb.TestGroup{
+				Name:             "bad",
+				DaysOfResults:    1,
+				GcsPrefix:        "fake path",
+				NumColumnsRecent: 1,
+				TestMetadataOptions: []*configpb.TestMetadataOptions{
+					{
+						BugComponent:  1234,
+						TestNameRegex: ".*stuff",
+					},
+				},
+			},
+		},
+		{
+			name: "test metadata options zero component allowed",
+			pass: true,
+			testGroup: &configpb.TestGroup{
+				Name:             "bad",
+				DaysOfResults:    1,
+				GcsPrefix:        "fake path",
+				NumColumnsRecent: 1,
+				TestMetadataOptions: []*configpb.TestMetadataOptions{
+					{
+						BugComponent:  0,
+						TestNameRegex: ".*stuff",
+					},
+				},
+			},
+		},
+		{
+			name: "test metadata options negative component allowed",
+			pass: true,
+			testGroup: &configpb.TestGroup{
+				Name:             "bad",
+				DaysOfResults:    1,
+				GcsPrefix:        "fake path",
+				NumColumnsRecent: 1,
+				TestMetadataOptions: []*configpb.TestMetadataOptions{
+					{
+						BugComponent:  -1,
+						TestNameRegex: ".*stuff",
+					},
+				},
+			},
+		},
+		{
+			name: "invalid empty test metadata options",
+			testGroup: &configpb.TestGroup{
+				Name:             "bad",
+				DaysOfResults:    1,
+				GcsPrefix:        "fake path",
+				NumColumnsRecent: 1,
+				TestMetadataOptions: []*configpb.TestMetadataOptions{
+					{
+						BugComponent: 1234,
+					},
+				},
+			},
+		},
+		{
+			name: "invalid test name regex",
+			testGroup: &configpb.TestGroup{
+				Name:             "bad",
+				DaysOfResults:    1,
+				GcsPrefix:        "fake path",
+				NumColumnsRecent: 1,
+				TestMetadataOptions: []*configpb.TestMetadataOptions{
+					{
+						BugComponent:  1234,
+						TestNameRegex: "?bad",
+					},
+				},
+			},
+		},
+		{
+			name: "invalid message regex",
+			testGroup: &configpb.TestGroup{
+				Name:             "bad",
+				DaysOfResults:    1,
+				GcsPrefix:        "fake path",
+				NumColumnsRecent: 1,
+				TestMetadataOptions: []*configpb.TestMetadataOptions{
+					{
+						BugComponent: 1234,
+						MessageRegex: "?bad",
+					},
+				},
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -897,6 +1237,47 @@ func TestValidateDashboardTab(t *testing.T) {
 				TabularNamesRegex: `(\d+).*(\d+)`,
 			},
 			err: true,
+		},
+		{
+			name: "invalid max acceptable flakiness parameter",
+			tab: &configpb.DashboardTab{
+				Name:          "pug",
+				TestGroupName: "test_group_2",
+				StatusCustomizationOptions: &configpb.DashboardTabStatusCustomizationOptions{
+					MaxAcceptableFlakiness: 101.5,
+				},
+			},
+			err: true,
+		},
+		{
+			name: "tab, has testgroup, valid max acceptable flakiness parameter",
+			tab: &configpb.DashboardTab{
+				Name:          "pug",
+				TestGroupName: "test_group_2",
+				StatusCustomizationOptions: &configpb.DashboardTabStatusCustomizationOptions{
+					MaxAcceptableFlakiness: 25.0,
+				},
+			},
+		},
+		{
+			name: "tab, has testgroup, valid max acceptable flakiness parameter, lower boundary",
+			tab: &configpb.DashboardTab{
+				Name:          "pug",
+				TestGroupName: "test_group_2",
+				StatusCustomizationOptions: &configpb.DashboardTabStatusCustomizationOptions{
+					MaxAcceptableFlakiness: 0.0,
+				},
+			},
+		},
+		{
+			name: "tab, has testgroup, valid max acceptable flakiness parameter, upper boundary",
+			tab: &configpb.DashboardTab{
+				Name:          "pug",
+				TestGroupName: "test_group_2",
+				StatusCustomizationOptions: &configpb.DashboardTabStatusCustomizationOptions{
+					MaxAcceptableFlakiness: 100.0,
+				},
+			},
 		},
 	}
 	for _, test := range tests {

@@ -48,7 +48,7 @@ func hintStarted(cols []InflatedColumn) string {
 	return hint
 }
 
-func gcsColumnReader(client gcs.Client, buildTimeout time.Duration, readResult *resultReader) ColumnReader {
+func gcsColumnReader(client gcs.Client, buildTimeout time.Duration, readResult *resultReader, enableIgnoreSkip bool) ColumnReader {
 	return func(ctx context.Context, parentLog logrus.FieldLogger, tg *configpb.TestGroup, oldCols []InflatedColumn, stop time.Time, receivers chan<- InflatedColumn) error {
 		tgPaths, err := groupPaths(tg)
 		if err != nil {
@@ -59,6 +59,7 @@ func gcsColumnReader(client gcs.Client, buildTimeout time.Duration, readResult *
 		log := parentLog.WithField("since", since)
 
 		log.Trace("Listing builds...")
+		listBuildsStart := time.Now()
 		builds, err := listBuilds(ctx, client, since, tgPaths...)
 		if errors.Is(err, storage.ErrBucketNotExist) {
 			log.WithError(err).Info("Bucket does not exist")
@@ -67,9 +68,9 @@ func gcsColumnReader(client gcs.Client, buildTimeout time.Duration, readResult *
 		if err != nil {
 			return fmt.Errorf("list builds: %w", err)
 		}
-		log.WithField("total", len(builds)).Debug("Listed builds")
+		log.WithField("listBuilds", time.Since(listBuildsStart)).WithField("total", len(builds)).Debug("Listed builds")
 
-		readColumns(ctx, client, log, tg, builds, stop, buildTimeout, receivers, readResult)
+		readColumns(ctx, client, log, tg, builds, stop, buildTimeout, receivers, readResult, enableIgnoreSkip)
 		return nil
 	}
 }
@@ -137,27 +138,13 @@ func resultReaderPool(poolCtx context.Context, log *logrus.Entry, concurrency in
 	}
 }
 
-func basicResultReader() *resultReader {
-
-	var lock sync.RWMutex
-	readResult := func(ctx context.Context, client gcs.Downloader, build gcs.Build, stop time.Time) func() (*gcsResult, error) {
-		return func() (*gcsResult, error) {
-			return readResult(ctx, client, build, stop)
-		}
-	}
-	return &resultReader{
-		lock: lock.RLocker(),
-		read: readResult,
-	}
-}
-
 type resultReader struct {
 	lock sync.Locker
 	read func(context.Context, gcs.Downloader, gcs.Build, time.Time) func() (*gcsResult, error)
 }
 
 // readColumns will list, download and process builds into inflatedColumns.
-func readColumns(ctx context.Context, client gcs.Downloader, log logrus.FieldLogger, group *configpb.TestGroup, builds []gcs.Build, stop time.Time, buildTimeout time.Duration, receivers chan<- InflatedColumn, readResult *resultReader) {
+func readColumns(ctx context.Context, client gcs.Downloader, log logrus.FieldLogger, group *configpb.TestGroup, builds []gcs.Build, stop time.Time, buildTimeout time.Duration, receivers chan<- InflatedColumn, readResult *resultReader, enableIgnoreSkip bool) {
 	if len(builds) == 0 {
 		return
 	}
@@ -199,14 +186,22 @@ func readColumns(ctx context.Context, client gcs.Downloader, log logrus.FieldLog
 					extra = make([]string, len(heads))
 				}
 				when := started + 0.01*float64(failures)
-				if err == errAncient {
-					col = ancientColumn(id, when, extra)
+				var ancientErr *ancientError
+				var noStartErr *noStartError
+				if errors.As(err, &ancientErr) {
+					col = ancientColumn(id, when, extra, ancientErr.Error())
+				} else if errors.As(err, &noStartErr) {
+					col = noStartColumn(id, when, extra, noStartErr.Error())
 				} else {
 					msg := fmt.Sprintf("Failed to download %s: %s", b, err.Error())
 					col = erroredColumn(id, when, extra, msg)
 				}
 			} else {
-				col = convertResult(log, nameCfg, id, heads, *result, makeOptions(group))
+				opts := makeOptions(group)
+				if !enableIgnoreSkip {
+					opts.ignoreSkip = false
+				}
+				col = convertResult(log, nameCfg, id, heads, *result, opts)
 				log.WithField("rows", len(col.Cells)).Debug("Read result")
 				failures = 0
 				extra = col.Column.Extra
@@ -223,8 +218,10 @@ func readColumns(ctx context.Context, client gcs.Downloader, log logrus.FieldLog
 	defer wg.Wait()
 
 	defer close(ch)
-	readResult.lock.Lock()
-	defer readResult.lock.Unlock()
+	if len(builds) > 2 {
+		readResult.lock.Lock()
+		defer readResult.lock.Unlock()
+	}
 	for i := len(builds) - 1; i >= 0; i-- {
 		b := builds[i]
 		r := resp{
@@ -239,7 +236,7 @@ func readColumns(ctx context.Context, client gcs.Downloader, log logrus.FieldLog
 	}
 }
 
-func ancientColumn(id string, when float64, extra []string) InflatedColumn {
+func ancientColumn(id string, when float64, extra []string, msg string) InflatedColumn {
 	return InflatedColumn{
 		Column: &statepb.Column{
 			Build:   id,
@@ -249,8 +246,25 @@ func ancientColumn(id string, when float64, extra []string) InflatedColumn {
 		},
 		Cells: map[string]Cell{
 			overallRow: {
-				Message: "Build is too old to process",
+				Message: msg,
 				Result:  statuspb.TestStatus_UNKNOWN,
+			},
+		},
+	}
+}
+
+func noStartColumn(id string, when float64, extra []string, msg string) InflatedColumn {
+	return InflatedColumn{
+		Column: &statepb.Column{
+			Build:   id,
+			Hint:    id,
+			Started: when,
+			Extra:   extra,
+		},
+		Cells: map[string]Cell{
+			overallRow: {
+				Message: msg,
+				Result:  statuspb.TestStatus_RUNNING,
 			},
 		},
 	}
@@ -282,6 +296,7 @@ type groupOptions struct {
 	userKey        string
 	annotations    []*configpb.TestGroup_TestAnnotation
 	rules          []*evalpb.Rule
+	ignoreSkip     bool
 }
 
 func makeOptions(group *configpb.TestGroup) groupOptions {
@@ -294,6 +309,7 @@ func makeOptions(group *configpb.TestGroup) groupOptions {
 		userKey:        group.UserProperty,
 		annotations:    group.TestAnnotations,
 		rules:          group.GetCustomEvaluatorRuleSet().GetRules(),
+		ignoreSkip:     group.GetIgnoreSkip(),
 	}
 }
 
@@ -381,9 +397,19 @@ func ensureJobName(nc *nameConfig) {
 	nc.parts = append([]string{jobName}, nc.parts...)
 }
 
-var (
-	errAncient = errors.New("build is too old")
-)
+type ancientError struct {
+	msg string
+}
+
+func (e *ancientError) Error() string {
+	return e.msg
+}
+
+type noStartError struct{}
+
+func (e *noStartError) Error() string {
+	return "Start timestamp for this job is 0."
+}
 
 // readResult will download all GCS artifacts in parallel.
 //
@@ -439,7 +465,10 @@ func readResult(parent context.Context, client gcs.Downloader, build gcs.Build, 
 		case err != nil:
 			err = fmt.Errorf("started: %w", err)
 		case time.Unix(s.Timestamp, 0).Before(stop):
-			err = errAncient
+			err = &ancientError{fmt.Sprintf("build too old; started %v before %v)", s.Timestamp, stop.Unix())}
+			if s.Timestamp == 0 {
+				err = &noStartError{}
+			}
 		default:
 			result.started = *s
 		}
@@ -510,7 +539,7 @@ func readResult(parent context.Context, client gcs.Downloader, build gcs.Build, 
 	return &result, nil
 }
 
-// readSuites asynchrounously lists and downloads junit.xml files
+// readSuites asynchronously lists and downloads junit.xml files
 func readSuites(parent context.Context, client gcs.Downloader, build gcs.Build) ([]gcs.SuitesMeta, error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()

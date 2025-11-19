@@ -26,14 +26,17 @@ import (
 	"strings"
 	"time"
 
-	gpubsub "cloud.google.com/go/pubsub"
 	"github.com/GoogleCloudPlatform/testgrid/pkg/pubsub"
 	"github.com/GoogleCloudPlatform/testgrid/pkg/updater"
+	"github.com/GoogleCloudPlatform/testgrid/pkg/updater/resultstore"
 	"github.com/GoogleCloudPlatform/testgrid/util"
 	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
 	"github.com/GoogleCloudPlatform/testgrid/util/metrics/prometheus"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/api/option"
+
+	gpubsub "cloud.google.com/go/pubsub"
+	configpb "github.com/GoogleCloudPlatform/testgrid/pb/config"
 )
 
 // options configures the updater
@@ -50,9 +53,9 @@ type options struct {
 	buildTimeout      time.Duration
 	gridPrefix        string
 	subscriptions     util.Strings
-	reprocessOnChange bool
 	reprocessList     util.Strings
-	pooled            bool
+	enableIgnoreSkip  bool
+	enableResultStore bool
 
 	debug    bool
 	trace    bool
@@ -71,10 +74,7 @@ func (o *options) validate() error {
 		o.groupConcurrency = runtime.NumCPU()
 	}
 	if o.buildConcurrency == 0 {
-		o.buildConcurrency = runtime.NumCPU()
-		if o.buildConcurrency > 4 {
-			o.buildConcurrency = 4
-		}
+		o.buildConcurrency = o.groupConcurrency * 4
 	}
 
 	return subscribeGCS(o.subscriptions.Strings()...)
@@ -109,14 +109,14 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 	fs.IntVar(&o.buildConcurrency, "build-concurrency", 0, "Manually define the number of builds to concurrently read if non-zero")
 	fs.DurationVar(&o.wait, "wait", 0, "Ensure at least this much time has passed since the last loop (exit if zero).")
 	fs.Var(&o.subscriptions, "subscribe", "gcs-prefix=project-id/sub-id (repeatable)")
-	fs.BoolVar(&o.reprocessOnChange, "reprocess-on-change", true, "Replace last week of results when config changes when set")
 	fs.Var(&o.reprocessList, "reprocess-group-on-change", "Limit reprocessing to specific groups if set (repeatable)")
 
 	fs.DurationVar(&o.groupTimeout, "group-timeout", 10*time.Minute, "Maximum time to wait for each group to update")
 	fs.DurationVar(&o.buildTimeout, "build-timeout", 3*time.Minute, "Maximum time to wait to read each build")
 	fs.StringVar(&o.gridPrefix, "grid-prefix", "grid", "Join this with the grid name to create the GCS suffix")
 
-	fs.BoolVar(&o.pooled, "pooled", false, "Use a pool to fetch builds if set")
+	fs.BoolVar(&o.enableIgnoreSkip, "enable-ignore-skip", false, "If true, enable ignore_skip behavior.")
+	fs.BoolVar(&o.enableResultStore, "enable-resultstore", false, "If true, fetch results from ResultStore.")
 
 	fs.BoolVar(&o.debug, "debug", false, "Log debug lines if set")
 	fs.BoolVar(&o.trace, "trace", false, "Log trace and debug lines if set")
@@ -129,6 +129,38 @@ func gatherFlagOptions(fs *flag.FlagSet, args ...string) options {
 // gatherOptions reads options from flags
 func gatherOptions() options {
 	return gatherFlagOptions(flag.CommandLine, os.Args[1:]...)
+}
+
+type resultSource string
+
+const (
+	gcsSource         resultSource = "GCS"
+	resultStoreSource resultSource = "ResultStore"
+	unknownSource     resultSource = "unknown"
+)
+
+func source(tg *configpb.TestGroup) resultSource {
+	if tg.GetUseKubernetesClient() || tg.GetResultSource().GetGcsConfig() != nil {
+		return gcsSource
+	}
+	if tg.GetResultSource().GetResultstoreConfig() != nil {
+		return resultStoreSource
+	}
+	return unknownSource
+}
+
+func updateGroup(updateGCS, updateResultStore updater.GroupUpdater) updater.GroupUpdater {
+	return func(parent context.Context, log logrus.FieldLogger, client gcs.Client, tg *configpb.TestGroup, gridPath gcs.Path) (bool, error) {
+		source := source(tg)
+		switch source {
+		case gcsSource:
+			return updateGCS(parent, log, client, tg, gridPath)
+		case resultStoreSource:
+			return updateResultStore(parent, log, client, tg, gridPath)
+		default:
+			return false, errors.New("invalid result source (must be one of GCS, ResultStore)")
+		}
+	}
 }
 
 func main() {
@@ -168,16 +200,18 @@ func main() {
 	})
 	log.Info("Configured concurrency")
 
-	var poolCtx context.Context
-	var concurrency = opt.buildConcurrency
-	if opt.pooled {
-		poolCtx = ctx
-		concurrency = opt.groupConcurrency // TODO(fejta): * opt.buildConcurrency
-		log.Info("Reading builds concurrently from a pool")
-	} else {
-		log.Info("Reading builds serially from each group")
+	var rsClient *resultstore.DownloadClient
+	if opt.enableResultStore {
+		rsConn, err := resultstore.Connect(ctx, "")
+		if err != nil {
+			logrus.WithError(err).Fatal("Failed to connect to ResultStore.")
+		}
+		rsClient = resultstore.NewClient(rsConn)
 	}
-	groupUpdater := updater.GCS(poolCtx, client, opt.groupTimeout, opt.buildTimeout, concurrency, opt.confirm, updater.SortStarted, opt.reprocessOnChange)
+
+	updateGCS := updater.GCS(ctx, client, opt.groupTimeout, opt.buildTimeout, opt.buildConcurrency, opt.confirm, opt.enableIgnoreSkip)
+	updateResultStore := resultstore.Updater(rsClient, client, opt.groupTimeout, opt.confirm)
+	updateAll := updateGroup(updateGCS, updateResultStore)
 
 	mets := updater.CreateMetrics(prometheus.NewFactory())
 
@@ -197,7 +231,16 @@ func main() {
 		fixers = append(fixers, updater.FixPersistent(log, client, path, ticker.C))
 	}
 
-	if err := updater.Update(ctx, client, mets, opt.config, opt.gridPrefix, opt.groupConcurrency, opt.groups.Strings(), groupUpdater, opt.confirm, opt.wait, fixers...); err != nil {
+	opts := &updater.UpdateOptions{
+		ConfigPath:       opt.config,
+		GridPrefix:       opt.gridPrefix,
+		GroupConcurrency: opt.groupConcurrency,
+		GroupNames:       opt.groups.Strings(),
+		Write:            opt.confirm,
+		Freq:             opt.wait,
+	}
+
+	if err := updater.Update(ctx, client, mets, updateAll, opts, fixers...); err != nil {
 		logrus.WithError(err).Error("Could not update")
 	}
 }

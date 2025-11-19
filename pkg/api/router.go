@@ -19,55 +19,73 @@ package api
 
 import (
 	"context"
-	"net/url"
+	"fmt"
+	"net/http"
 	"time"
 
-	"github.com/gorilla/mux"
-
 	"cloud.google.com/go/storage"
+	"github.com/go-chi/chi"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
+
+	v1pb "github.com/GoogleCloudPlatform/testgrid/pb/api/v1"
 	v1 "github.com/GoogleCloudPlatform/testgrid/pkg/api/v1"
 	"github.com/GoogleCloudPlatform/testgrid/util/gcs"
 )
 
 // RouterOptions are the options needed to GetRouter
 type RouterOptions struct {
-	GcsCredentials string
-	Hostname       *url.URL
-	HomeBucket     string
-	GridPathPrefix string
-	TabPathPrefix  string
-	Timeout        time.Duration
+	GcsCredentials           string
+	HomeBucket               string
+	TabPathPrefix            string
+	SummaryPathPrefix        string
+	AccessControlAllowOrigin string
+	Timeout                  time.Duration
 }
 
 const v1InfixRef = "/api/v1"
 
-// GetRouter returns an http router that serves TestGrid's API
+var healthCheckFile = "pkg/api/README.md" // a relative path
+
+// GetRouters returns an http router and gRPC server that both serve TestGrid's API
 // It also instantiates necessary caching and i/o objects
-func GetRouter(options RouterOptions, storageClient *storage.Client) (*mux.Router, error) {
-	r := mux.NewRouter()
+func GetRouters(options RouterOptions, storageClient *storage.Client) (http.Handler, *grpc.Server, error) {
+	server, err := GetServer(options, storageClient)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	router := chi.NewRouter()
+	router.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		http.ServeFile(w, req, healthCheckFile)
+	})
+	router.Mount(v1InfixRef, v1.Route(nil, *server))
+
+	grpcOptions := []grpc.ServerOption{}
+	grpcServer := grpc.NewServer(grpcOptions...)
+	v1pb.RegisterTestGridDataServer(grpcServer, server)
+	reflection.Register(grpcServer)
+
+	return router, grpcServer, nil
+}
+
+// GetServer returns a server that serves TestGrid's API
+// It also instantiates necessary caching and i/o objects
+func GetServer(options RouterOptions, storageClient *storage.Client) (*v1.Server, error) {
 	if storageClient == nil {
 		sc, err := gcs.ClientWithCreds(context.Background(), options.GcsCredentials)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("clientWithCreds(): %w", err)
 		}
 		storageClient = sc
 	}
 
-	v1InfixURL, err := url.Parse(v1InfixRef)
-	if err != nil {
-		return nil, err
-	}
-
-	sub1 := r.PathPrefix(v1InfixRef).Subrouter()
-	s := v1.Server{
-		Client:         gcs.NewClient(storageClient),
-		Host:           options.Hostname.ResolveReference(v1InfixURL),
-		DefaultBucket:  options.HomeBucket,
-		GridPathPrefix: options.GridPathPrefix,
-		TabPathPrefix:  options.TabPathPrefix,
-		Timeout:        options.Timeout,
-	}
-	v1.Route(sub1, s)
-
-	return sub1, nil
+	return &v1.Server{
+		Client:                   gcs.NewClient(storageClient),
+		DefaultBucket:            options.HomeBucket,
+		TabPathPrefix:            options.TabPathPrefix,
+		SummaryPathPrefix:        options.SummaryPathPrefix,
+		AccessControlAllowOrigin: options.AccessControlAllowOrigin,
+		Timeout:                  options.Timeout,
+	}, nil
 }

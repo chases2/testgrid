@@ -25,14 +25,12 @@ import (
 	"math/rand"
 	"net/url"
 	"path"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
-	"bitbucket.org/creachadair/stringset"
 	"cloud.google.com/go/storage"
 	"github.com/GoogleCloudPlatform/testgrid/config"
 	"github.com/GoogleCloudPlatform/testgrid/config/snapshot"
@@ -90,14 +88,14 @@ func (mets *Metrics) start() *metrics.CycleReporter {
 type GroupUpdater func(parent context.Context, log logrus.FieldLogger, client gcs.Client, tg *configpb.TestGroup, gridPath gcs.Path) (bool, error)
 
 // GCS returns a GCS-based GroupUpdater, which knows how to process result data stored in GCS.
-func GCS(poolCtx context.Context, colClient gcs.Client, groupTimeout, buildTimeout time.Duration, concurrency int, write bool, sortCols ColumnSorter, reprocessOnChange bool, reprocessGroups ...string) GroupUpdater {
-	reprocessable := stringset.New(reprocessGroups...)
+func GCS(poolCtx context.Context, colClient gcs.Client, groupTimeout, buildTimeout time.Duration, concurrency int, write bool, enableIgnoreSkip bool) GroupUpdater {
 	var readResult *resultReader
-	if poolCtx != nil {
-		readResult = resultReaderPool(poolCtx, logrus.WithField("pool", "readResult"), concurrency)
-	} else {
-		readResult = basicResultReader()
+	if poolCtx == nil {
+		// TODO(fejta): remove check soon
+		panic("Context must be non-nil")
 	}
+	readResult = resultReaderPool(poolCtx, logrus.WithField("pool", "readResult"), concurrency)
+
 	return func(parent context.Context, log logrus.FieldLogger, client gcs.Client, tg *configpb.TestGroup, gridPath gcs.Path) (bool, error) {
 		if !tg.UseKubernetesClient && (tg.ResultSource == nil || tg.ResultSource.GetGcsConfig() == nil) {
 			log.Debug("Skipping non-kubernetes client group")
@@ -105,10 +103,9 @@ func GCS(poolCtx context.Context, colClient gcs.Client, groupTimeout, buildTimeo
 		}
 		ctx, cancel := context.WithTimeout(parent, groupTimeout)
 		defer cancel()
-		gcsColReader := gcsColumnReader(colClient, buildTimeout, readResult)
+		gcsColReader := gcsColumnReader(colClient, buildTimeout, readResult, enableIgnoreSkip)
 		reprocess := 20 * time.Minute // allow 20m for prow to finish uploading artifacts
-		canReprocess := reprocessOnChange && (reprocessable.Len() == 0 || reprocessable.Contains(tg.Name))
-		return InflateDropAppend(ctx, log, client, tg, gridPath, write, gcsColReader, sortCols, reprocess, canReprocess)
+		return InflateDropAppend(ctx, log, client, tg, gridPath, write, gcsColReader, reprocess)
 	}
 }
 
@@ -240,39 +237,49 @@ func (fixer lastUpdated) Fix(ctx context.Context, log logrus.FieldLogger, q *con
 // request an immediate update whenever the data changes.
 type Fixer func(context.Context, logrus.FieldLogger, *config.TestGroupQueue, []*configpb.TestGroup) error
 
+// UpdateOptions aggregates the Update function parameter into a single structure.
+type UpdateOptions struct {
+	ConfigPath       gcs.Path
+	GridPrefix       string
+	GroupConcurrency int
+	GroupNames       []string
+	Write            bool
+	Freq             time.Duration
+}
+
 // Update test groups with the specified freq.
 //
 // Retries errors at double and unfinished groups as soon as possible.
 //
 // Filters down to a single group when set.
 // Returns after all groups updated once if freq is zero.
-func Update(parent context.Context, client gcs.ConditionalClient, mets *Metrics, configPath gcs.Path, gridPrefix string, groupConcurrency int, groupNames []string, updateGroup GroupUpdater, write bool, freq time.Duration, fixers ...Fixer) error {
+func Update(parent context.Context, client gcs.ConditionalClient, mets *Metrics, updateGroup GroupUpdater, opts *UpdateOptions, fixers ...Fixer) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	log := logrus.WithField("config", configPath)
+	log := logrus.WithField("config", opts.ConfigPath)
 
 	var q config.TestGroupQueue
 
 	log.Debug("Observing config...")
-	newConfig, err := snapshot.Observe(ctx, log, client, configPath, time.NewTicker(time.Minute).C)
+	newConfig, err := snapshot.Observe(ctx, log, client, opts.ConfigPath, time.NewTicker(time.Minute).C)
 	if err != nil {
 		return fmt.Errorf("observe config: %w", err)
 
 	}
 	cfg := <-newConfig
-	groups, err := testGroups(cfg, groupNames...)
+	groups, err := testGroups(cfg, opts.GroupNames...)
 	if err != nil {
 		return fmt.Errorf("filter test groups: %w", err)
 	}
 
-	q.Init(log, groups, time.Now().Add(freq))
+	q.Init(log, groups, time.Now().Add(opts.Freq))
 
 	log.Debug("Fetching initial start times...")
 	fixLastUpdated := lastUpdated{
 		client:     client,
-		gridPrefix: gridPrefix,
-		configPath: configPath,
-		freq:       freq,
+		gridPrefix: opts.GridPrefix,
+		configPath: opts.ConfigPath,
+		freq:       opts.Freq,
 	}
 	if err := fixLastUpdated.fixOnce(ctx, log, &q, groups); err != nil {
 		return fmt.Errorf("get generations: %v", err)
@@ -294,6 +301,9 @@ func Update(parent context.Context, client gcs.ConditionalClient, mets *Metrics,
 			if delay < 0 {
 				delay = 0
 				log = log.WithField("sleep", -delay)
+			}
+			if max := opts.Freq * 2; max > 0 && delay > max {
+				delay = max
 			}
 			log = log.WithField("delay", delay.Round(time.Second))
 			mets.delay(delay)
@@ -329,16 +339,20 @@ func Update(parent context.Context, client gcs.ConditionalClient, mets *Metrics,
 			case <-ctx.Done():
 				fixCancel()
 				return
-			case cfg := <-newConfig:
+			case cfg, ok := <-newConfig:
+				if !ok {
+					fixCancel()
+					return
+				}
 				log.Info("Updating config")
-				groups, err = testGroups(cfg, groupNames...)
+				groups, err = testGroups(cfg, opts.GroupNames...)
 				if err != nil {
 					log.Errorf("Error during config update: %v", err)
 				}
 				log.Debug("Cancelling fixers on old test groups...")
 				fixCancel()
 				fixWg.Wait()
-				q.Init(log, groups, time.Now().Add(freq))
+				q.Init(log, groups, time.Now().Add(opts.Freq))
 				log.Debug("Canceled fixers on old test groups")
 				fixCtx, fixCancel = context.WithCancel(ctx)
 				fixAll()
@@ -349,7 +363,7 @@ func Update(parent context.Context, client gcs.ConditionalClient, mets *Metrics,
 	active := map[string]bool{}
 	var lock sync.RWMutex
 	var wg sync.WaitGroup
-	wg.Add(groupConcurrency)
+	wg.Add(opts.GroupConcurrency)
 	defer wg.Wait()
 	channel := make(chan *configpb.TestGroup)
 	defer close(channel)
@@ -365,7 +379,7 @@ func Update(parent context.Context, client gcs.ConditionalClient, mets *Metrics,
 			return
 		}
 		fin := mets.start()
-		tgp, err := TestGroupPath(configPath, gridPrefix, name)
+		tgp, err := TestGroupPath(opts.ConfigPath, opts.GridPrefix, name)
 		if err != nil {
 			fin.Fail()
 			log.WithError(err).Error("Bad path")
@@ -384,7 +398,9 @@ func Update(parent context.Context, client gcs.ConditionalClient, mets *Metrics,
 			active[name] = false
 			lock.Unlock()
 		}()
+		start := time.Now()
 		unprocessed, err := updateGroup(ctx, log, client, tg, *tgp)
+		log.WithField("duration", time.Since(start)).Info("Finished processing group.")
 		if err != nil {
 			log := log.WithError(err)
 			if gcs.IsPreconditionFailed(err) {
@@ -395,8 +411,8 @@ func Update(parent context.Context, client gcs.ConditionalClient, mets *Metrics,
 				log.Error("Failed to update group")
 			}
 			var delay time.Duration
-			if freq > 0 {
-				delay = freq/4 + time.Duration(rand.Int63n(int64(freq/4))) // Int63n() panics if freq <= 0
+			if opts.Freq > 0 {
+				delay = opts.Freq/4 + time.Duration(rand.Int63n(int64(opts.Freq/4))) // Int63n() panics if freq <= 0
 				log = log.WithField("delay", delay.Seconds())
 				q.Fix(tg.Name, time.Now().Add(delay), true)
 			}
@@ -408,18 +424,17 @@ func Update(parent context.Context, client gcs.ConditionalClient, mets *Metrics,
 		}
 	}
 
-	for i := 0; i < groupConcurrency; i++ {
+	for i := 0; i < opts.GroupConcurrency; i++ {
 		go func() {
 			defer wg.Done()
 			for tg := range channel {
 				updateTestGroup(tg)
-				runtime.GC()
 			}
 		}()
 	}
 
 	log.Info("Starting to process test groups...")
-	return q.Send(ctx, channel, freq)
+	return q.Send(ctx, channel, opts.Freq)
 }
 
 // TestGroupPath returns the path to a test_group proto given this proto
@@ -542,23 +557,17 @@ func listBuilds(ctx context.Context, client gcs.Lister, since string, paths ...g
 //     and reading a second column.
 type ColumnReader func(ctx context.Context, log logrus.FieldLogger, tg *configpb.TestGroup, oldCols []InflatedColumn, stop time.Time, receivers chan<- InflatedColumn) error
 
-// A ColumnSorter sort InflatedColumns as desired.
-type ColumnSorter func(*configpb.TestGroup, []InflatedColumn)
-
 // SortStarted sorts InflatedColumns by column start time.
-func SortStarted(_ *configpb.TestGroup, cols []InflatedColumn) {
+func SortStarted(cols []InflatedColumn) {
 	sort.SliceStable(cols, func(i, j int) bool {
 		return cols[i].Column.Started > cols[j].Column.Started
 	})
 }
 
-var (
-	byteCeiling int = 2e6 // 2mb, var so testing can change
-	cellCeiling int = 1e6 // 1mb, var so testing can change
-)
+const byteCeiling = 2e6 // 2 megabytes
 
 // InflateDropAppend updates groups by downloading the existing grid, dropping old rows and appending new ones.
-func InflateDropAppend(ctx context.Context, alog logrus.FieldLogger, client gcs.Client, tg *configpb.TestGroup, gridPath gcs.Path, write bool, readCols ColumnReader, sortCols ColumnSorter, reprocess time.Duration, reprocessOnChange bool) (bool, error) {
+func InflateDropAppend(ctx context.Context, alog logrus.FieldLogger, client gcs.Client, tg *configpb.TestGroup, gridPath gcs.Path, write bool, readCols ColumnReader, reprocess time.Duration) (bool, error) {
 	log := alog.(logrus.Ext1FieldLogger) // Add trace method
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -592,6 +601,7 @@ func InflateDropAppend(ctx context.Context, alog logrus.FieldLogger, client gcs.
 	}
 
 	stop := time.Now().Add(-dur)
+	log = log.WithField("stop", stop)
 
 	var oldCols []InflatedColumn
 	var issues map[string][]string
@@ -601,6 +611,7 @@ func InflateDropAppend(ctx context.Context, alog logrus.FieldLogger, client gcs.
 	if err != nil {
 		log.WithField("path", gridPath).WithError(err).Error("Failed to download existing grid")
 	}
+	inflateStart := time.Now()
 	if old != nil {
 		var cols []InflatedColumn
 		var err error
@@ -609,18 +620,16 @@ func InflateDropAppend(ctx context.Context, alog logrus.FieldLogger, client gcs.
 			return false, fmt.Errorf("inflate: %w", err)
 		}
 		var floor time.Time
-		if reprocessOnChange {
-			when := time.Now().Add(-7 * 24 * time.Hour)
-			if col := reprocessColumn(log, old, tg, when); col != nil {
-				cols = append(cols, *col)
-				floor = when
-			}
-		} else {
-			floor = time.Now().Add(-72 * time.Hour)
+		when := time.Now().Add(-7 * 24 * time.Hour)
+		if col := reprocessColumn(log, old, tg, when); col != nil {
+			cols = append(cols, *col)
+			floor = when
 		}
-		SortStarted(tg, cols) // Our processing requires descending start time.
+		SortStarted(cols) // Our processing requires descending start time.
 		oldCols = truncateRunning(cols, floor)
 	}
+	inflateDur := time.Since(inflateStart)
+	readColsStart := time.Now()
 	var cols []InflatedColumn
 	var unreadColumns bool
 	if attrs != nil && attrs.Size >= int64(byteCeiling) {
@@ -699,16 +708,20 @@ func InflateDropAppend(ctx context.Context, alog logrus.FieldLogger, client gcs.
 		cols = append(cols, oldCols...)
 		cols = groupColumns(tg, cols)
 	}
+	readColsDur := time.Since(readColsStart)
 
-	sortCols(tg, cols)
+	SortStarted(cols)
 
-	if truncateGrid(cols, cellCeiling) {
-		cols = groupColumns(tg, cols)
-	}
-	grid, buf, err := shrinkGrid(shrinkGrace, log, tg, cols, issues, byteCeiling)
+	shrinkStart := time.Now()
+	cols = truncateGrid(cols, byteCeiling) // Assume each cell is at least 1 byte
+	var grid *statepb.Grid
+	var buf []byte
+	grid, buf, err = shrinkGridInline(shrinkGrace, log, tg, cols, issues, byteCeiling)
 	if err != nil {
-		return false, fmt.Errorf("shrink grid: %v", err)
+		return false, fmt.Errorf("shrink grid inline: %v", err)
 	}
+	shrinkDur := time.Since(shrinkStart)
+
 	grid.Config = tg
 
 	log = log.WithField("url", gridPath).WithField("bytes", len(buf))
@@ -725,34 +738,28 @@ func InflateDropAppend(ctx context.Context, alog logrus.FieldLogger, client gcs.
 		log = log.WithField("more", true)
 	}
 	log.WithFields(logrus.Fields{
-		"cols": len(grid.Columns),
-		"rows": len(grid.Rows),
+		"cols":     len(grid.Columns),
+		"rows":     len(grid.Rows),
+		"inflate":  inflateDur,
+		"readCols": readColsDur,
+		"shrink":   shrinkDur,
 	}).Info("Wrote grid")
 	return unreadColumns, nil
 }
 
-func truncateGrid(cols []InflatedColumn, cellCeiling int) bool {
-	// Assume each cell consumes at least 1 byte
+// truncateGrid cuts grid down to 'cellCeiling' or fewer cells
+// Used as a cheap way to truncate before the finer-tuned shrinkGridInline.
+func truncateGrid(cols []InflatedColumn, cellCeiling int) []InflatedColumn {
 	var cells int
-	var max int
-	var dropped int
 	for i := 0; i < len(cols); i++ {
 		nc := len(cols[i].Cells)
 		cells += nc
 		if i < 2 || cells <= cellCeiling {
 			continue
 		}
-		dropped += nc
-		if max > 0 { // merge together these columns
-			cols[i].Column.Name = ""
-			cols[i].Column.Build = ""
-			cols[i].Cells = nil
-		} else {
-			max = i
-		}
-		cols[max].Cells = truncatedCells(cells, cellCeiling, dropped, "cell")
+		return cols[:i]
 	}
-	return max > 0
+	return cols
 }
 
 // reprocessColumn returns a column with a running result if the previous config differs from the current one
@@ -775,7 +782,7 @@ func reprocessColumn(log logrus.FieldLogger, old *statepb.Grid, currentCfg *conf
 	}
 }
 
-func shrinkGrid(ctx context.Context, log logrus.FieldLogger, tg *configpb.TestGroup, cols []InflatedColumn, issues map[string][]string, byteCeiling int) (*statepb.Grid, []byte, error) {
+func shrinkGridInline(ctx context.Context, log logrus.FieldLogger, tg *configpb.TestGroup, cols []InflatedColumn, issues map[string][]string, byteCeiling int) (*statepb.Grid, []byte, error) {
 	// Hopefully the grid is small enough...
 	grid := constructGridFromGroupConfig(log, tg, cols, issues)
 	buf, err := gcs.MarshalGrid(grid)
@@ -787,148 +794,86 @@ func shrinkGrid(ctx context.Context, log logrus.FieldLogger, tg *configpb.TestGr
 		return grid, buf, nil
 	}
 
-	// Nope, let's drop old row data...
-	byteCeiling /= 2
+	// Nope, let's drop old data...
+	newCeiling := byteCeiling / 2
 
 	log = log.WithField("originally", orig)
-	for i := len(cols) / 2; i >= 0; i = i/2 - 1 {
+	for i := len(cols) / 2; i > 0; i = i / 2 {
 		select {
 		case <-ctx.Done():
-			log.WithField("finally", orig).Info("Timeout shrinking row data")
+			log.WithField("size", len(buf)).Info("Timeout shrinking row data")
 			return grid, buf, nil
 		default:
 		}
 
-		log.WithField("currently", orig).Debug("Shrinking row data")
+		log.WithField("size", len(buf)).Debug("Shrinking row data")
 
-		// drop perf data
-		var changed bool
-		for j := i; j < len(cols); j++ {
-			nc := len(cols[j].Cells)
-			if nc < 2 {
-				continue
-			}
-			changed = changed || stripCells(cols[j].Cells, orig, byteCeiling)
-		}
+		// shrink cols to half and cap
+		truncateLastColumn(cols[0:i], orig, byteCeiling, "byte")
 
-		if changed {
-			grid = constructGridFromGroupConfig(log, tg, cols, issues)
-			buf, err = gcs.MarshalGrid(grid)
-			if err != nil {
-				return nil, nil, fmt.Errorf("marshal grid: %w", err)
-			}
-
-			cur := len(buf)
-			if cur < byteCeiling {
-				return grid, buf, nil
-			}
-		}
-
-		// truncate cells
-		for j := i; j < len(cols); j++ {
-			nc := len(cols[j].Cells) - 1 // ignore injected stripCells row
-			if nc < 2 {
-				continue
-			}
-			cols[j].Cells = truncatedCells(orig, byteCeiling, nc, "byte")
-		}
-		grid = constructGridFromGroupConfig(log, tg, cols, issues)
+		grid = constructGridFromGroupConfig(log, tg, cols[0:i], issues)
 		buf, err = gcs.MarshalGrid(grid)
 		if err != nil {
 			return nil, nil, fmt.Errorf("marshal grid: %w", err)
 		}
 
-		orig = len(buf)
-		if orig < byteCeiling {
+		if len(buf) < newCeiling {
+			log.WithField("size", len(buf)).Info("Shrunk row data")
 			return grid, buf, nil
 		}
+
 	}
 
-	// Not enough, let's try merging columns
-	for i := len(cols) / 2; i >= 0; i = i/2 - 1 {
-		select {
-		case <-ctx.Done():
-			log.WithField("finally", orig).Info("Timeout shrinking column data")
-			return grid, buf, nil
-		default:
-		}
-
-		log.WithField("bytes", orig).Info("Shrinking column data")
-
-		// Nope, let's drop old row data...
-
-		for j := i; j < len(cols); j++ {
-			cols[j].Column.Name = ""
-			cols[j].Column.Build = ""
-		}
-		cols = groupColumns(tg, cols)
-
-		// Hopefully it is the right size...
-		grid = constructGridFromGroupConfig(log, tg, cols, issues)
-		buf, err = gcs.MarshalGrid(grid)
-		if err != nil {
-			return nil, nil, fmt.Errorf("marshal grid: %w", err)
-		}
-
-		orig := len(buf)
-		if orig < byteCeiling {
-			return grid, buf, nil
-		}
-	}
+	// One column isn't small enough. Return a single-cell grid.
+	grid = constructGridFromGroupConfig(log, tg, deletedColumn(cols[0]), nil)
+	buf, err = gcs.MarshalGrid(grid)
+	log.WithField("size", len(buf)).Info("Shrunk to minimum; storing metadata only")
 	return grid, buf, err
 }
 
-const truncatedRow = "Truncated"
+// Legacy row name to report data truncation
+const truncatedRowName = "Truncated"
 
-func removeProperties(cell *Cell) {
-	cell.Properties = nil
+func truncateLastColumn(grid []InflatedColumn, orig, max int, entity string) {
+	if len(grid) == 0 {
+		return
+	}
+	last := len(grid) - 1
+	for name, cell := range grid[last].Cells {
+		if name == truncatedRowName {
+			delete(grid[last].Cells, truncatedRowName)
+			continue
+		}
+		if cell.Result == statuspb.TestStatus_NO_RESULT {
+			continue
+		}
+		cell.Result = statuspb.TestStatus_UNKNOWN
+		cell.Message = fmt.Sprintf("%d %s grid exceeds maximum size of %d %ss", orig, entity, max, entity)
+		cell.Icon = "..." // Overwritten by the UI
+		grid[last].Cells[name] = cell
+	}
 }
 
-func stripCells(cells map[string]Cell, orig, max int) bool {
-	var changed bool
-	for name, cell := range cells {
-		var changedCell bool
-		if len(cell.Metrics) > 0 {
-			cell.Metrics = nil
-			changedCell = true
-		}
-		if len(cell.Properties) > 0 {
-			removeProperties(&cell)
-			changedCell = true
-		}
-		if len(cell.Message) > 0 {
-			cell.Message = ""
-			changedCell = true
-		}
-		if changedCell {
-			changed = true
-			cells[name] = cell
-		}
-	}
-	if changed {
-		cells[truncatedRow] = Cell{
-			Result:  statuspb.TestStatus_UNKNOWN,
-			ID:      truncatedRow,
-			Message: fmt.Sprintf("%d byte grid exceeds maximum size of %d bytes, removed messages, metrics and properties", orig, max),
-		}
-	}
-	return changed
-}
-
-func truncatedCells(orig, max, dropped int, entity string) map[string]Cell {
-	return map[string]Cell{
-		truncatedRow: {
-			Result:  statuspb.TestStatus_UNKNOWN,
-			ID:      truncatedRow,
-			Message: fmt.Sprintf("%d %s grid exceeds maximum size of %d %ss, removed %d rows", orig, entity, max, entity, dropped),
+// A column with the same header data, but all the rows deleted.
+func deletedColumn(latestColumn InflatedColumn) []InflatedColumn {
+	return []InflatedColumn{
+		{
+			Column: latestColumn.Column,
+			Cells: map[string]Cell{
+				truncatedRowName: {
+					Result:  statuspb.TestStatus_UNKNOWN,
+					ID:      truncatedRowName,
+					Message: fmt.Sprintf("The grid is too large to update. Split this testgroup into multiple testgroups."),
+				},
+			},
 		},
 	}
 }
 
-// formatStrftime replaces python codes with what go expects.
+// FormatStrftime replaces python codes with what go expects.
 //
 // aka %Y-%m-%d becomes 2006-01-02
-func formatStrftime(in string) string {
+func FormatStrftime(in string) string {
 	replacements := map[string]string{
 		"%p": "PM",
 		"%Y": "2006",
@@ -953,7 +898,7 @@ func overrideBuild(tg *configpb.TestGroup, cols []InflatedColumn) {
 	if fmt == "" {
 		return
 	}
-	fmt = formatStrftime(fmt)
+	fmt = FormatStrftime(fmt)
 	for _, col := range cols {
 		started := int64(col.Column.Started)
 		when := time.Unix(started/1000, (started%1000)*int64(time.Millisecond/time.Nanosecond))
@@ -1082,7 +1027,7 @@ func days(d float64) time.Duration {
 // ConstructGrid will append all the inflatedColumns into the returned Grid.
 //
 // The returned Grid has correctly compressed row values.
-func ConstructGrid(log logrus.FieldLogger, cols []InflatedColumn, issues map[string][]string, failuresToAlert, passesToDisableAlert int, useCommitAsBuildID bool, userProperty string, brokenThreshold float32) *statepb.Grid {
+func ConstructGrid(log logrus.FieldLogger, cols []InflatedColumn, issues map[string][]string, failuresToAlert, passesToDisableAlert int, useCommitAsBuildID bool, userProperty string, brokenThreshold float32, columnHeader []*configpb.TestGroup_ColumnHeader) *statepb.Grid {
 	// Add the columns into a grid message
 	var grid statepb.Grid
 	rows := map[string]*statepb.Row{} // For fast target => row lookup
@@ -1101,12 +1046,12 @@ func ConstructGrid(log logrus.FieldLogger, cols []InflatedColumn, issues map[str
 
 	for name, row := range rows {
 		row.Issues = append(row.Issues, issues[name]...)
-		issues := make(map[string]bool, len(row.Issues))
+		issueSet := make(map[string]bool, len(row.Issues))
 		for _, i := range row.Issues {
-			issues[i] = true
+			issueSet[i] = true
 		}
-		row.Issues = make([]string, 0, len(issues))
-		for i := range issues {
+		row.Issues = make([]string, 0, len(issueSet))
+		for i := range issueSet {
 			row.Issues = append(row.Issues, i)
 		}
 		sort.SliceStable(row.Issues, func(i, j int) bool {
@@ -1115,7 +1060,7 @@ func ConstructGrid(log logrus.FieldLogger, cols []InflatedColumn, issues map[str
 		})
 	}
 
-	alertRows(grid.Columns, grid.Rows, failuresToAlert, passesToDisableAlert, useCommitAsBuildID, userProperty)
+	alertRows(grid.Columns, grid.Rows, failuresToAlert, passesToDisableAlert, useCommitAsBuildID, userProperty, columnHeader)
 	sort.SliceStable(grid.Rows, func(i, j int) bool {
 		return sortorder.NaturalLess(grid.Rows[i].Name, grid.Rows[j].Name)
 	})
@@ -1146,17 +1091,20 @@ func ConstructGrid(log logrus.FieldLogger, cols []InflatedColumn, issues map[str
 // The returned Grid has correctly compressed row values.
 func constructGridFromGroupConfig(log logrus.FieldLogger, group *configpb.TestGroup, cols []InflatedColumn, issues map[string][]string) *statepb.Grid {
 	usesK8sClient := group.UseKubernetesClient || (group.GetResultSource().GetGcsConfig() != nil)
-	return ConstructGrid(log, cols, issues, int(group.GetNumFailuresToAlert()), int(group.GetNumPassesToDisableAlert()), usesK8sClient, group.GetUserProperty(), 0.0)
+	return ConstructGrid(log, cols, issues, int(group.GetNumFailuresToAlert()), int(group.GetNumPassesToDisableAlert()), usesK8sClient, group.GetUserProperty(), 0.0, group.GetColumnHeader())
 }
 
 func dropEmptyRows(log logrus.FieldLogger, grid *statepb.Grid, rows map[string]*statepb.Row) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	filled := make([]*statepb.Row, 0, len(rows))
 	var dropped int
 	for _, r := range grid.Rows {
 		var found bool
-		for res := range result.Iter(ctx, r.Results) {
+		f := result.Iter(r.Results)
+		for {
+			res, more := f()
+			if !more {
+				break
+			}
 			if res == statuspb.TestStatus_NO_RESULT {
 				continue
 			}
@@ -1323,34 +1271,33 @@ func AppendColumn(grid *statepb.Grid, rows map[string]*statepb.Row, inflated Inf
 }
 
 // alertRows configures the alert for every row that has one.
-func alertRows(cols []*statepb.Column, rows []*statepb.Row, openFailures, closePasses int, useCommitAsBuildID bool, userProperty string) {
+func alertRows(cols []*statepb.Column, rows []*statepb.Row, openFailures, closePasses int, useCommitAsBuildID bool, userProperty string, columnHeader []*configpb.TestGroup_ColumnHeader) {
 	for _, r := range rows {
-		r.AlertInfo = alertRow(cols, r, openFailures, closePasses, useCommitAsBuildID, userProperty)
+		r.AlertInfo = alertRow(cols, r, openFailures, closePasses, useCommitAsBuildID, userProperty, columnHeader)
 	}
 }
 
 // alertRow returns an AlertInfo proto if there have been failuresToOpen consecutive failures more recently than passesToClose.
-func alertRow(cols []*statepb.Column, row *statepb.Row, failuresToOpen, passesToClose int, useCommitAsBuildID bool, userPropertyName string) *statepb.AlertInfo {
+func alertRow(cols []*statepb.Column, row *statepb.Row, failuresToOpen, passesToClose int, useCommitAsBuildID bool, userPropertyName string, columnHeader []*configpb.TestGroup_ColumnHeader) *statepb.AlertInfo {
 	if failuresToOpen == 0 {
 		return nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var concurrentFailures int
 	var totalFailures int32
 	var passes int
 	var compressedIdx int
-	ch := result.Iter(ctx, row.Results)
+	f := result.Iter(row.Results)
 	var firstFail *statepb.Column
 	var latestFail *statepb.Column
 	var latestPass *statepb.Column
 	var failIdx int
 	var latestFailIdx int
+	customColumnHeaders := make(map[string]string)
 	// find the first number of consecutive passesToClose (no alert)
 	// or else failuresToOpen (alert).
 	for _, col := range cols {
 		// TODO(fejta): ignore old running
-		rawRes := <-ch
+		rawRes, _ := f()
 		res := result.Coalesce(rawRes, result.IgnoreRunning)
 		if res == statuspb.TestStatus_NO_RESULT {
 			if rawRes == statuspb.TestStatus_RUNNING {
@@ -1393,6 +1340,23 @@ func alertRow(cols []*statepb.Column, row *statepb.Row, failuresToOpen, passesTo
 			concurrentFailures = 0
 		}
 		compressedIdx++
+
+		for i := 0; i < len(columnHeader); i++ {
+			if i >= len(col.Extra) {
+				logrus.WithFields(logrus.Fields{
+					"started":                 time.Unix(0, int64(col.GetStarted()*float64(time.Millisecond))),
+					"additionalColumnHeaders": col.GetExtra(),
+				}).Trace("Insufficient column header values to record.")
+				break
+			}
+			if columnHeader[i].Label != "" {
+				customColumnHeaders[columnHeader[i].Label] = col.Extra[i]
+			} else if columnHeader[i].Property != "" {
+				customColumnHeaders[columnHeader[i].Property] = col.Extra[i]
+			} else {
+				customColumnHeaders[columnHeader[i].ConfigurationValue] = col.Extra[i]
+			}
+		}
 	}
 	if concurrentFailures < failuresToOpen {
 		return nil
@@ -1410,24 +1374,26 @@ func alertRow(cols []*statepb.Column, row *statepb.Row, failuresToOpen, passesTo
 			userPropertyName: row.UserProperty[latestFailIdx],
 		}
 	}
-	return alertInfo(totalFailures, msg, id, latestID, userProperties, firstFail, latestFail, latestPass, useCommitAsBuildID)
+
+	return alertInfo(totalFailures, msg, id, latestID, userProperties, firstFail, latestFail, latestPass, useCommitAsBuildID, customColumnHeaders)
 }
 
 // alertInfo returns an alert proto with the configured fields
-func alertInfo(failures int32, msg, cellID, latestCellID string, userProperties map[string]string, fail, latestFail, pass *statepb.Column, useCommitAsBuildID bool) *statepb.AlertInfo {
+func alertInfo(failures int32, msg, cellID, latestCellID string, userProperties map[string]string, fail, latestFail, pass *statepb.Column, useCommitAsBuildID bool, customColumnHeaders map[string]string) *statepb.AlertInfo {
 	return &statepb.AlertInfo{
-		FailCount:         failures,
-		FailBuildId:       buildID(fail, useCommitAsBuildID),
-		LatestFailBuildId: buildID(latestFail, useCommitAsBuildID),
-		FailTime:          stamp(fail),
-		FailTestId:        cellID,
-		LatestFailTestId:  latestCellID,
-		FailureMessage:    msg,
-		PassTime:          stamp(pass),
-		PassBuildId:       buildID(pass, useCommitAsBuildID),
-		EmailAddresses:    emailAddresses(fail),
-		HotlistIds:        hotlistIDs(fail),
-		Properties:        userProperties,
+		FailCount:           failures,
+		FailBuildId:         buildID(fail, useCommitAsBuildID),
+		LatestFailBuildId:   buildID(latestFail, useCommitAsBuildID),
+		FailTime:            stamp(fail),
+		FailTestId:          cellID,
+		LatestFailTestId:    latestCellID,
+		FailureMessage:      msg,
+		PassTime:            stamp(pass),
+		PassBuildId:         buildID(pass, useCommitAsBuildID),
+		EmailAddresses:      emailAddresses(fail),
+		HotlistIds:          hotlistIDs(fail),
+		Properties:          userProperties,
+		CustomColumnHeaders: customColumnHeaders,
 	}
 }
 

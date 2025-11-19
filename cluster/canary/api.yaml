@@ -25,8 +25,9 @@ spec:
       serviceAccountName: api
       containers:
       - name: api
-        image: gcr.io/k8s-testgrid/api:v20220519-v0.0.138-11-g7a466e5e
+        image: gcr.io/k8s-testgrid/api:v20230926-v0.0.165-24-ge8c030e5
         args:
+        - --allowed-origin=*
         - --scope=gs://k8s-testgrid-canary
         - --port=8080
 ---

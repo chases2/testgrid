@@ -28,6 +28,7 @@ import (
 	"github.com/golang/protobuf/proto"
 
 	configpb "github.com/GoogleCloudPlatform/testgrid/pb/config"
+	"github.com/GoogleCloudPlatform/testgrid/pkg/updater/resultstore/query"
 	multierror "github.com/hashicorp/go-multierror"
 )
 
@@ -73,6 +74,7 @@ func (e ValidationError) Error() string {
 }
 
 // Normalize lowercases, and removes all non-alphanumeric characters from a string.
+// WARNING: Unless you are validating config or sanitizing API input, avoid using normalization. Bare names are acceptable keys.
 func Normalize(s string) string {
 	regex := regexp.MustCompile("[^a-zA-Z0-9]+")
 	s = regex.ReplaceAllString(s, "")
@@ -255,6 +257,49 @@ func validateEmails(addresses string) error {
 	return nil
 }
 
+func validateResultStoreSource(tg *configpb.TestGroup) error {
+	if rs := tg.GetResultSource().GetResultstoreConfig(); rs != nil {
+		// Can't define other sources if ResultStore source is used.
+		if tg.GetGcsPrefix() != "" {
+			return errors.New("cannot define both resultstore_config and gcs_prefix")
+		}
+		if tg.GetUseKubernetesClient() {
+			return errors.New("cannot define both resultstore_config and use_kubernetes_client")
+		}
+		// Can't leave project ID blank.
+		if rs.GetProject() == "" {
+			return errors.New("project ID in resultstore_config cannot be empty")
+		}
+		if _, err := query.TranslateQuery(rs.GetQuery()); err != nil {
+			return fmt.Errorf("invalid ResultStore query %q: %v", rs.GetQuery(), err)
+		}
+	}
+	return nil
+}
+
+func validateGCSSource(tg *configpb.TestGroup) error {
+	if rs := tg.GetResultSource().GetGcsConfig(); rs != nil {
+		// Can't define other sources if GCS source is used.
+		if tg.GetGcsPrefix() != "" {
+			return errors.New("cannot define both resultstore_config and gcs_prefix")
+		}
+		if tg.GetUseKubernetesClient() {
+			return errors.New("cannot define both resultstore_config and use_kubernetes_client")
+		}
+		// Can't leave the source's GCS prefix blank.
+		if rs.GetGcsPrefix() == "" {
+			return errors.New("gcs_prefix in gcs_config cannot be empty")
+		}
+		// Pubsub project and subscription must both be empty or filled.
+		proj := rs.GetPubsubProject()
+		sub := rs.GetPubsubSubscription()
+		if (proj == "" && sub != "") || (proj != "" && sub == "") {
+			return fmt.Errorf("pubsub project and subscription must both be empty or filled; got project %q and subscription %q", proj, sub)
+		}
+	}
+	return nil
+}
+
 func validateTestGroup(tg *configpb.TestGroup) error {
 	var mErr error
 	if tg == nil {
@@ -269,6 +314,14 @@ func validateTestGroup(tg *configpb.TestGroup) error {
 	}
 	if tg.GetNumColumnsRecent() <= 0 {
 		mErr = multierror.Append(mErr, errors.New("num_columns_recent should be positive"))
+	}
+
+	// Result source should be valid.
+	if err := validateResultStoreSource(tg); err != nil {
+		mErr = multierror.Append(mErr, fmt.Errorf("error in ResultStore result source: %v", err))
+	}
+	if err := validateGCSSource(tg); err != nil {
+		mErr = multierror.Append(mErr, fmt.Errorf("error in GCS result source: %v", err))
 	}
 
 	// Regexes should be valid.
@@ -286,9 +339,6 @@ func validateTestGroup(tg *configpb.TestGroup) error {
 	// Test metadata options should be reasonable, valid values.
 	metadataOpts := tg.GetTestMetadataOptions()
 	for _, opt := range metadataOpts {
-		if opt.GetBugComponent() <= 0 {
-			mErr = multierror.Append(mErr, errors.New("bug_component is required"))
-		}
 		if opt.GetMessageRegex() == "" && opt.GetTestNameRegex() == "" {
 			mErr = multierror.Append(mErr, errors.New("at least one of message_regex or test_name_regex must be specified"))
 		}
@@ -401,7 +451,7 @@ func validateDashboardTab(dt *configpb.DashboardTab) error {
 				}
 			}
 			if regex.NumSubexp() != len(names) {
-				mErr = multierror.Append(mErr, fmt.Errorf("all tabular_name_regex capture groups must be named"))
+				mErr = multierror.Append(mErr, errors.New("all tabular_name_regex capture groups must be named"))
 			}
 			if len(names) < 1 {
 				mErr = multierror.Append(mErr, errors.New("tabular_name_regex requires at least one capture group"))
@@ -414,6 +464,11 @@ func validateDashboardTab(dt *configpb.DashboardTab) error {
 		if err := validateEmails(dt.GetAlertOptions().GetAlertMailToAddresses()); err != nil {
 			mErr = multierror.Append(mErr, err)
 		}
+	}
+
+	// Max acceptable flakiness parameter should be valid (between 0.0 and 100.0 - both inclusive).
+	if maxAcceptableFlakiness := dt.GetStatusCustomizationOptions().GetMaxAcceptableFlakiness(); maxAcceptableFlakiness < 0 || maxAcceptableFlakiness > 100 {
+		mErr = multierror.Append(mErr, errors.New("invalid value provided for max_acceptable_flakiness (should be between 0.0 and 100.0)"))
 	}
 
 	return mErr

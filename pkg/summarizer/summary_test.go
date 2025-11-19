@@ -24,8 +24,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"net/url"
-	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -37,7 +35,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/sirupsen/logrus"
-	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/testing/protocmp"
 
 	"github.com/GoogleCloudPlatform/testgrid/internal/result"
@@ -111,6 +108,7 @@ func TestUpdateDashboard(t *testing.T) {
 						OverallStatus:       summarypb.DashboardTabSummary_STALE,
 						Status:              noRuns,
 						LatestGreen:         noGreens,
+						SummaryMetrics:      &summarypb.DashboardTabSummaryMetrics{},
 					},
 				},
 			},
@@ -172,6 +170,7 @@ func TestUpdateDashboard(t *testing.T) {
 						Status:              noRuns,
 						OverallStatus:       summarypb.DashboardTabSummary_STALE,
 						LatestGreen:         noGreens,
+						SummaryMetrics:      &summarypb.DashboardTabSummaryMetrics{},
 					},
 					tabStatus("a-dashboard", "missing-tab", `Test group does not exist: "group-not-present"`),
 					tabStatus("a-dashboard", "error-tab", fmt.Sprintf("Error attempting to summarize tab: load has-errors: open: tragedy")),
@@ -183,6 +182,7 @@ func TestUpdateDashboard(t *testing.T) {
 						Status:              noRuns,
 						OverallStatus:       summarypb.DashboardTabSummary_STALE,
 						LatestGreen:         noGreens,
+						SummaryMetrics:      &summarypb.DashboardTabSummaryMetrics{},
 					},
 				},
 			},
@@ -253,6 +253,7 @@ func TestUpdateDashboard(t *testing.T) {
 						OverallStatus:       summarypb.DashboardTabSummary_UNKNOWN,
 						LatestGreen:         noGreens,
 						BugUrl:              "",
+						SummaryMetrics:      &summarypb.DashboardTabSummaryMetrics{},
 					},
 					{
 						DashboardName:       "a-dashboard",
@@ -262,6 +263,7 @@ func TestUpdateDashboard(t *testing.T) {
 						OverallStatus:       summarypb.DashboardTabSummary_UNKNOWN,
 						LatestGreen:         noGreens,
 						BugUrl:              "",
+						SummaryMetrics:      &summarypb.DashboardTabSummaryMetrics{},
 					},
 					{
 						DashboardName:       "a-dashboard",
@@ -271,6 +273,7 @@ func TestUpdateDashboard(t *testing.T) {
 						OverallStatus:       summarypb.DashboardTabSummary_UNKNOWN,
 						LatestGreen:         noGreens,
 						BugUrl:              "http://some-bugs/",
+						SummaryMetrics:      &summarypb.DashboardTabSummaryMetrics{},
 					},
 					{
 						DashboardName:       "a-dashboard",
@@ -280,6 +283,7 @@ func TestUpdateDashboard(t *testing.T) {
 						OverallStatus:       summarypb.DashboardTabSummary_UNKNOWN,
 						LatestGreen:         noGreens,
 						BugUrl:              "http://more-bugs/",
+						SummaryMetrics:      &summarypb.DashboardTabSummaryMetrics{},
 					},
 					{
 						DashboardName:       "a-dashboard",
@@ -289,6 +293,7 @@ func TestUpdateDashboard(t *testing.T) {
 						OverallStatus:       summarypb.DashboardTabSummary_UNKNOWN,
 						LatestGreen:         noGreens,
 						BugUrl:              "http://ooh-bugs/",
+						SummaryMetrics:      &summarypb.DashboardTabSummaryMetrics{},
 					},
 				},
 			},
@@ -296,7 +301,7 @@ func TestUpdateDashboard(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tabUpdater := tabUpdatePool(context.Background(), logrus.WithField("name", "pool"), 5)
+		tabUpdater := tabUpdatePool(context.Background(), logrus.WithField("name", "pool"), 5, FeatureFlags{false, false, false})
 		t.Run(tc.name, func(t *testing.T) {
 			finder := func(dash string, tab *configpb.DashboardTab) (*gcs.Path, *configpb.TestGroup, gridReader, error) {
 				name := tab.TestGroupName
@@ -474,6 +479,7 @@ func TestUpdateTab(t *testing.T) {
 		mod       time.Time
 		gen       int64
 		gridError error
+		features  FeatureFlags
 		expected  *summarypb.DashboardTabSummary
 		err       bool
 	}{
@@ -508,6 +514,529 @@ func TestUpdateTab(t *testing.T) {
 				LatestGreen:         noGreens,
 				OverallStatus:       summarypb.DashboardTabSummary_STALE,
 				Status:              noRuns,
+				SummaryMetrics:      &summarypb.DashboardTabSummaryMetrics{},
+			},
+		},
+		{
+			name: "fuzzy flakiness configured and allowed",
+			tab: &configpb.DashboardTab{
+				Name:             "foo-tab",
+				TestGroupName:    "foo-group",
+				NumColumnsRecent: 4,
+				StatusCustomizationOptions: &configpb.DashboardTabStatusCustomizationOptions{
+					MaxAcceptableFlakiness: 50.0,
+				},
+			},
+			group: &configpb.TestGroup{},
+			grid: &statepb.Grid{
+				Rows: []*statepb.Row{
+					{
+						Name:    "test-1",
+						Results: []int32{int32(statuspb.TestStatus_PASS), 3, int32(statuspb.TestStatus_FAIL), 1},
+					},
+				},
+				Columns: []*statepb.Column{
+					{
+						Name:  "Uno",
+						Build: "1",
+					},
+					{
+						Name:  "Dos",
+						Build: "2",
+					},
+					{
+						Name:  "San",
+						Build: "3",
+					},
+					{
+						Name:  "Four",
+						Build: "4",
+					},
+				},
+			},
+			mod: now,
+			gen: 43,
+			features: FeatureFlags{
+				AllowFuzzyFlakiness: true,
+			},
+			expected: &summarypb.DashboardTabSummary{
+				DashboardTabName:    "foo-tab",
+				LastUpdateTimestamp: float64(now.Unix()),
+				OverallStatus:       summarypb.DashboardTabSummary_ACCEPTABLE,
+				LatestGreen:         "1",
+				Status:              "Tab stats: 3 of 4 (75.0%) recent columns passed (3 of 4 or 75.0% cells)\nStatus info: Recent flakiness (25.0%) over valid columns is within configured acceptable level of 50.0%.",
+				SummaryMetrics: &summarypb.DashboardTabSummaryMetrics{
+					CompletedColumns: 4,
+					PassingColumns:   3,
+				},
+			},
+		},
+		{
+			name: "fuzzy flakiness configured but not allowed",
+			tab: &configpb.DashboardTab{
+				Name:             "foo-tab",
+				TestGroupName:    "foo-group",
+				NumColumnsRecent: 4,
+				StatusCustomizationOptions: &configpb.DashboardTabStatusCustomizationOptions{
+					MaxAcceptableFlakiness: 50.0,
+				},
+			},
+			group: &configpb.TestGroup{},
+			grid: &statepb.Grid{
+				Rows: []*statepb.Row{
+					{
+						Name:    "test-1",
+						Results: []int32{int32(statuspb.TestStatus_PASS), 3, int32(statuspb.TestStatus_FAIL), 1},
+					},
+				},
+				Columns: []*statepb.Column{
+					{
+						Name:  "Uno",
+						Build: "1",
+					},
+					{
+						Name:  "Dos",
+						Build: "2",
+					},
+					{
+						Name:  "Three",
+						Build: "3",
+					},
+					{
+						Name:  "Quattro",
+						Build: "4",
+					},
+				},
+			},
+			mod: now,
+			gen: 43,
+			features: FeatureFlags{
+				AllowFuzzyFlakiness: false,
+			},
+			expected: &summarypb.DashboardTabSummary{
+				DashboardTabName:    "foo-tab",
+				LastUpdateTimestamp: float64(now.Unix()),
+				OverallStatus:       summarypb.DashboardTabSummary_FLAKY,
+				LatestGreen:         "1",
+				Status:              "Tab stats: 3 of 4 (75.0%) recent columns passed (3 of 4 or 75.0% cells)",
+				SummaryMetrics: &summarypb.DashboardTabSummaryMetrics{
+					CompletedColumns: 4,
+					PassingColumns:   3,
+				},
+			},
+		},
+		{
+			name: "ignored columns configured and allowed",
+			tab: &configpb.DashboardTab{
+				Name:             "foo-tab",
+				TestGroupName:    "foo-group",
+				NumColumnsRecent: 4,
+				StatusCustomizationOptions: &configpb.DashboardTabStatusCustomizationOptions{
+					IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+						configpb.DashboardTabStatusCustomizationOptions_CATEGORIZED_ABORT,
+						configpb.DashboardTabStatusCustomizationOptions_CANCEL,
+					},
+				},
+			},
+			group: &configpb.TestGroup{},
+			grid: &statepb.Grid{
+				Rows: []*statepb.Row{
+					{
+						Name: "test-1",
+						Results: []int32{
+							int32(statuspb.TestStatus_CATEGORIZED_ABORT), 1,
+							int32(statuspb.TestStatus_PASS), 3,
+						},
+					},
+					{
+						Name: "test-2",
+						Results: []int32{
+							int32(statuspb.TestStatus_FAIL), 1,
+							int32(statuspb.TestStatus_CANCEL), 1,
+							int32(statuspb.TestStatus_PASS), 2,
+						},
+					},
+				},
+				Columns: []*statepb.Column{
+					{
+						Name:  "Uno",
+						Build: "1",
+					},
+					{
+						Name:  "Dos",
+						Build: "2",
+					},
+					{
+						Name:  "San",
+						Build: "3",
+					},
+					{
+						Name:  "Chetyre",
+						Build: "4",
+					},
+				},
+			},
+			mod: now,
+			gen: 44,
+			features: FeatureFlags{
+				AllowIgnoredColumns: true,
+			},
+			expected: &summarypb.DashboardTabSummary{
+				DashboardTabName:    "foo-tab",
+				LastUpdateTimestamp: float64(now.Unix()),
+				OverallStatus:       summarypb.DashboardTabSummary_PASS,
+				LatestGreen:         "3",
+				Status:              "Tab stats: 2 of 4 (50.0%) recent columns passed (5 of 8 or 62.5% cells). 2 columns ignored",
+				SummaryMetrics: &summarypb.DashboardTabSummaryMetrics{
+					CompletedColumns: 4,
+					PassingColumns:   2,
+					IgnoredColumns:   2,
+				},
+			},
+		},
+		{
+			name: "ignored columns configured but not allowed",
+			tab: &configpb.DashboardTab{
+				Name:             "foo-tab",
+				TestGroupName:    "foo-group",
+				NumColumnsRecent: 4,
+				StatusCustomizationOptions: &configpb.DashboardTabStatusCustomizationOptions{
+					IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+						configpb.DashboardTabStatusCustomizationOptions_CATEGORIZED_ABORT,
+						configpb.DashboardTabStatusCustomizationOptions_CANCEL,
+					},
+				},
+			},
+			group: &configpb.TestGroup{},
+			grid: &statepb.Grid{
+				Rows: []*statepb.Row{
+					{
+						Name: "test-1",
+						Results: []int32{
+							int32(statuspb.TestStatus_CATEGORIZED_ABORT), 1,
+							int32(statuspb.TestStatus_PASS), 3,
+						},
+					},
+					{
+						Name: "test-2",
+						Results: []int32{
+							int32(statuspb.TestStatus_FAIL), 1,
+							int32(statuspb.TestStatus_CANCEL), 1,
+							int32(statuspb.TestStatus_PASS), 2,
+						},
+					},
+				},
+				Columns: []*statepb.Column{
+					{
+						Name:  "Uno",
+						Build: "1",
+					},
+					{
+						Name:  "Dos",
+						Build: "2",
+					},
+					{
+						Name:  "San",
+						Build: "3",
+					},
+					{
+						Name:  "Chetyre",
+						Build: "4",
+					},
+				},
+			},
+			mod: now,
+			gen: 44,
+			features: FeatureFlags{
+				AllowIgnoredColumns: false,
+			},
+			expected: &summarypb.DashboardTabSummary{
+				DashboardTabName:    "foo-tab",
+				LastUpdateTimestamp: float64(now.Unix()),
+				OverallStatus:       summarypb.DashboardTabSummary_FLAKY,
+				LatestGreen:         "3",
+				Status:              "Tab stats: 3 of 4 (75.0%) recent columns passed (5 of 8 or 62.5% cells)",
+				SummaryMetrics: &summarypb.DashboardTabSummaryMetrics{
+					CompletedColumns: 4,
+					PassingColumns:   3,
+					IgnoredColumns:   0,
+				},
+			},
+		},
+		{
+			name: "min required runs configured and allowed",
+			tab: &configpb.DashboardTab{
+				Name:             "foo-tab",
+				TestGroupName:    "foo-group",
+				NumColumnsRecent: 4,
+				StatusCustomizationOptions: &configpb.DashboardTabStatusCustomizationOptions{
+					MinAcceptableRuns: 5,
+				},
+			},
+			group: &configpb.TestGroup{},
+			grid: &statepb.Grid{
+				Rows: []*statepb.Row{
+					{
+						Name: "test-1",
+						Results: []int32{
+							int32(statuspb.TestStatus_CATEGORIZED_ABORT), 1,
+							int32(statuspb.TestStatus_PASS), 3,
+						},
+					},
+					{
+						Name: "test-2",
+						Results: []int32{
+							int32(statuspb.TestStatus_FAIL), 1,
+							int32(statuspb.TestStatus_CANCEL), 1,
+							int32(statuspb.TestStatus_PASS), 2,
+						},
+					},
+				},
+				Columns: []*statepb.Column{
+					{
+						Name:  "Uno",
+						Build: "1",
+					},
+					{
+						Name:  "Dos",
+						Build: "2",
+					},
+					{
+						Name:  "San",
+						Build: "3",
+					},
+					{
+						Name:  "Chetyre",
+						Build: "4",
+					},
+				},
+			},
+			mod: now,
+			gen: 45,
+			features: FeatureFlags{
+				AllowMinNumberOfRuns: true,
+			},
+			expected: &summarypb.DashboardTabSummary{
+				DashboardTabName:    "foo-tab",
+				LastUpdateTimestamp: float64(now.Unix()),
+				OverallStatus:       summarypb.DashboardTabSummary_PENDING,
+				LatestGreen:         "3",
+				Status:              "Tab stats: 3 of 4 (75.0%) recent columns passed (5 of 8 or 62.5% cells)\nStatus info: Not enough runs",
+				SummaryMetrics: &summarypb.DashboardTabSummaryMetrics{
+					CompletedColumns: 4,
+					PassingColumns:   3,
+					IgnoredColumns:   0,
+				},
+			},
+		},
+		{
+			name: "min required runs configured but not allowed",
+			tab: &configpb.DashboardTab{
+				Name:             "foo-tab",
+				TestGroupName:    "foo-group",
+				NumColumnsRecent: 4,
+				StatusCustomizationOptions: &configpb.DashboardTabStatusCustomizationOptions{
+					MinAcceptableRuns: 5,
+				},
+			},
+			group: &configpb.TestGroup{},
+			grid: &statepb.Grid{
+				Rows: []*statepb.Row{
+					{
+						Name: "test-1",
+						Results: []int32{
+							int32(statuspb.TestStatus_CATEGORIZED_ABORT), 1,
+							int32(statuspb.TestStatus_PASS), 3,
+						},
+					},
+					{
+						Name: "test-2",
+						Results: []int32{
+							int32(statuspb.TestStatus_FAIL), 1,
+							int32(statuspb.TestStatus_CANCEL), 1,
+							int32(statuspb.TestStatus_PASS), 2,
+						},
+					},
+				},
+				Columns: []*statepb.Column{
+					{
+						Name:  "Uno",
+						Build: "1",
+					},
+					{
+						Name:  "Dos",
+						Build: "2",
+					},
+					{
+						Name:  "San",
+						Build: "3",
+					},
+					{
+						Name:  "Chetyre",
+						Build: "4",
+					},
+				},
+			},
+			mod: now,
+			gen: 45,
+			features: FeatureFlags{
+				AllowMinNumberOfRuns: false,
+			},
+			expected: &summarypb.DashboardTabSummary{
+				DashboardTabName:    "foo-tab",
+				LastUpdateTimestamp: float64(now.Unix()),
+				OverallStatus:       summarypb.DashboardTabSummary_FLAKY,
+				LatestGreen:         "3",
+				Status:              "Tab stats: 3 of 4 (75.0%) recent columns passed (5 of 8 or 62.5% cells)",
+				SummaryMetrics: &summarypb.DashboardTabSummaryMetrics{
+					CompletedColumns: 4,
+					PassingColumns:   3,
+					IgnoredColumns:   0,
+				},
+			},
+		},
+		{
+			name: "not enough runs after ignoring",
+			tab: &configpb.DashboardTab{
+				Name:             "foo-tab",
+				TestGroupName:    "foo-group",
+				NumColumnsRecent: 4,
+				StatusCustomizationOptions: &configpb.DashboardTabStatusCustomizationOptions{
+					MinAcceptableRuns:      3,
+					MaxAcceptableFlakiness: 50.0,
+					IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+						configpb.DashboardTabStatusCustomizationOptions_CATEGORIZED_ABORT,
+						configpb.DashboardTabStatusCustomizationOptions_BLOCKED,
+					},
+				},
+			},
+			group: &configpb.TestGroup{},
+			grid: &statepb.Grid{
+				Rows: []*statepb.Row{
+					{
+						Name: "test-1",
+						Results: []int32{
+							int32(statuspb.TestStatus_CATEGORIZED_ABORT), 1,
+							int32(statuspb.TestStatus_PASS), 3,
+						},
+					},
+					{
+						Name: "test-2",
+						Results: []int32{
+							int32(statuspb.TestStatus_FAIL), 1,
+							int32(statuspb.TestStatus_BLOCKED), 1,
+							int32(statuspb.TestStatus_PASS), 2,
+						},
+					},
+				},
+				Columns: []*statepb.Column{
+					{
+						Name:  "Uno",
+						Build: "1",
+					},
+					{
+						Name:  "Dos",
+						Build: "2",
+					},
+					{
+						Name:  "San",
+						Build: "3",
+					},
+					{
+						Name:  "Chetyre",
+						Build: "4",
+					},
+				},
+			},
+			mod: now,
+			gen: 45,
+			features: FeatureFlags{
+				AllowMinNumberOfRuns: true,
+				AllowFuzzyFlakiness:  true,
+				AllowIgnoredColumns:  true,
+			},
+			expected: &summarypb.DashboardTabSummary{
+				DashboardTabName:    "foo-tab",
+				LastUpdateTimestamp: float64(now.Unix()),
+				OverallStatus:       summarypb.DashboardTabSummary_PENDING,
+				LatestGreen:         "3",
+				Status:              "Tab stats: 2 of 4 (50.0%) recent columns passed (5 of 8 or 62.5% cells). 2 columns ignored\nStatus info: Not enough runs",
+				SummaryMetrics: &summarypb.DashboardTabSummaryMetrics{
+					CompletedColumns: 4,
+					PassingColumns:   2,
+					IgnoredColumns:   2,
+				},
+			},
+		},
+		{
+			name: "acceptably flaky after ignoring",
+			tab: &configpb.DashboardTab{
+				Name:             "foo-tab",
+				TestGroupName:    "foo-group",
+				NumColumnsRecent: 4,
+				StatusCustomizationOptions: &configpb.DashboardTabStatusCustomizationOptions{
+					MaxAcceptableFlakiness: 35.0,
+					IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+						configpb.DashboardTabStatusCustomizationOptions_CATEGORIZED_ABORT,
+						configpb.DashboardTabStatusCustomizationOptions_BLOCKED,
+					},
+				},
+			},
+			group: &configpb.TestGroup{},
+			grid: &statepb.Grid{
+				Rows: []*statepb.Row{
+					{
+						Name: "test-1",
+						Results: []int32{
+							int32(statuspb.TestStatus_CATEGORIZED_ABORT), 1,
+							int32(statuspb.TestStatus_PASS), 3,
+						},
+					},
+					{
+						Name: "test-2",
+						Results: []int32{
+							int32(statuspb.TestStatus_FAIL), 2,
+							int32(statuspb.TestStatus_PASS), 2,
+						},
+					},
+				},
+				Columns: []*statepb.Column{
+					{
+						Name:  "Uno",
+						Build: "1",
+					},
+					{
+						Name:  "Dos",
+						Build: "2",
+					},
+					{
+						Name:  "San",
+						Build: "3",
+					},
+					{
+						Name:  "Chetyre",
+						Build: "4",
+					},
+				},
+			},
+			mod: now,
+			gen: 45,
+			features: FeatureFlags{
+				AllowMinNumberOfRuns: true,
+				AllowFuzzyFlakiness:  true,
+				AllowIgnoredColumns:  true,
+			},
+			expected: &summarypb.DashboardTabSummary{
+				DashboardTabName:    "foo-tab",
+				LastUpdateTimestamp: float64(now.Unix()),
+				OverallStatus:       summarypb.DashboardTabSummary_ACCEPTABLE,
+				LatestGreen:         "3",
+				Status:              "Tab stats: 2 of 4 (50.0%) recent columns passed (5 of 8 or 62.5% cells). 1 columns ignored\nStatus info: Recent flakiness (33.3%) over valid columns is within configured acceptable level of 35.0%.",
+				SummaryMetrics: &summarypb.DashboardTabSummaryMetrics{
+					CompletedColumns: 4,
+					PassingColumns:   2,
+					IgnoredColumns:   1,
+				},
 			},
 		},
 		{
@@ -532,7 +1061,7 @@ func TestUpdateTab(t *testing.T) {
 				}
 				return ioutil.NopCloser(bytes.NewBuffer(compress(gridBuf(tc.grid)))), tc.mod, tc.gen, nil
 			}
-			actual, err := updateTab(context.Background(), tc.tab, tc.group, reader)
+			actual, err := updateTab(context.Background(), tc.tab, tc.group, reader, tc.features)
 			switch {
 			case err != nil:
 				if !tc.err {
@@ -772,115 +1301,34 @@ func TestFirstFilled(t *testing.T) {
 	}
 }
 
-func TestFilterGrid(t *testing.T) {
+func TestFilterMethods(t *testing.T) {
 	cases := []struct {
-		name        string
-		baseOptions string
-		rows        []*statepb.Row
-		recent      int
-		expected    []*statepb.Row
-		err         bool
+		name     string
+		rows     []*statepb.Row
+		recent   int
+		expected []*statepb.Row
+		err      bool
 	}{
 		{
+			name: "tolerates nil inputs",
+		},
+		{
 			name: "basically works",
-		},
-		{
-			name:        "bad options returns error",
-			baseOptions: "%z",
-			err:         true,
-		},
-		{
-			name: "everything works",
-			baseOptions: url.Values{
-				includeFilter: []string{"foo"},
-				excludeFilter: []string{"bar"},
-			}.Encode(),
 			rows: []*statepb.Row{
 				{
-					Name:    "include-food",
-					Results: []int32{int32(statuspb.TestStatus_PASS), 10},
-				},
-				{
-					Name:    "exclude-included-bart",
-					Results: []int32{int32(statuspb.TestStatus_PASS), 10},
-				},
-				{
-					Name: "ignore-included-stale",
-					Results: []int32{
-						int32(statuspb.TestStatus_NO_RESULT), 5,
-						int32(statuspb.TestStatus_PASS_WITH_SKIPS), 10,
-					},
-				},
-			},
-			recent: 5,
-			expected: []*statepb.Row{
-				{
-					Name:    "include-food",
-					Results: []int32{int32(statuspb.TestStatus_PASS), 10},
-				},
-			},
-		},
-		{
-			name: "must match all includes",
-			baseOptions: url.Values{
-				includeFilter: []string{"foo", "spam"},
-			}.Encode(),
-			rows: []*statepb.Row{
-				{
-					Name: "spam-is-food",
-				},
-				{
-					Name: "spam-musubi",
-				},
-				{
-					Name: "unagi-food",
-				},
-				{
-					Name: "email-spam-is-not-food",
+					Name: "okay",
+					Id:   "cool",
 				},
 			},
 			expected: []*statepb.Row{
 				{
-					Name: "spam-is-food",
-				},
-				{
-					Name: "email-spam-is-not-food",
-				},
-			},
-		},
-		{
-			name: "exclude any exclusions",
-			baseOptions: url.Values{
-				excludeFilter: []string{"not", "nope"},
-			}.Encode(),
-			rows: []*statepb.Row{
-				{
-					Name: "yes please",
-				},
-				{
-					Name: "leslie knope",
-				},
-				{
-					Name: "not eating",
-				},
-				{
-					Name: "fluffy waffles",
-				},
-			},
-			expected: []*statepb.Row{
-				{
-					Name: "yes please",
-				},
-				{
-					Name: "fluffy waffles",
+					Name: "okay",
+					Id:   "cool",
 				},
 			},
 		},
 		{
 			name: "exclude all test methods",
-			baseOptions: url.Values{
-				includeFilter: []string{"test"},
-			}.Encode(),
 			rows: []*statepb.Row{
 				{
 					Name: "test-1",
@@ -914,20 +1362,6 @@ func TestFilterGrid(t *testing.T) {
 				},
 			},
 		},
-		{
-			name: "bad inclusion regexp errors",
-			baseOptions: url.Values{
-				includeFilter: []string{"this.("},
-			}.Encode(),
-			err: true,
-		},
-		{
-			name: "bad exclude regexp errors",
-			baseOptions: url.Values{
-				excludeFilter: []string{"this.("},
-			}.Encode(),
-			err: true,
-		},
 	}
 
 	for _, tc := range cases {
@@ -942,18 +1376,11 @@ func TestFilterGrid(t *testing.T) {
 					r.Results = []int32{int32(statuspb.TestStatus_PASS), 100}
 				}
 			}
-			actual, err := filterGrid(tc.baseOptions, tc.rows, tc.recent)
-			switch {
-			case err != nil:
-				if !tc.err {
-					t.Errorf("unexpected error: %v", err)
-				}
-			case tc.err:
-				t.Error("failed to return an error")
-			case !reflect.DeepEqual(actual, tc.expected):
+			actual := filterMethods(tc.rows)
+
+			if !cmp.Equal(actual, tc.expected, protocmp.Transform()) {
 				t.Errorf("%s != expected %s", actual, tc.expected)
 			}
-
 		})
 	}
 }
@@ -1037,121 +1464,11 @@ func TestRecentRows(t *testing.T) {
 			for _, r := range actualRows {
 				actual = append(actual, r.Name)
 			}
-			if !reflect.DeepEqual(actual, tc.expected) {
+			if !cmp.Equal(actual, tc.expected, protocmp.Transform()) {
 				t.Errorf("%s != expected %s", actual, tc.expected)
 			}
 		})
 	}
-}
-
-func TestIncludeRows(t *testing.T) {
-	cases := []struct {
-		name     string
-		names    []string
-		include  string
-		expected []string
-		err      bool
-	}{
-		{
-			name: "basically works",
-		},
-		{
-			name:    "bad regex errors",
-			include: "^[a-z",
-			err:     true,
-		},
-		{
-			name:    "return nothing rows when nothing matches",
-			names:   []string{"hello", "world"},
-			include: "dog",
-		},
-		{
-			name:     "include only matching rows",
-			include:  "fun",
-			names:    []string{"apply", "function", "to", "funny", "bone"},
-			expected: []string{"function", "funny"},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var rows []*statepb.Row
-			for _, n := range tc.names {
-				rows = append(rows, &statepb.Row{Name: n})
-			}
-			actualRows, err := includeRows(rows, tc.include)
-			var actual []string
-			for _, r := range actualRows {
-				actual = append(actual, r.Name)
-			}
-			switch {
-			case err != nil:
-				if !tc.err {
-					t.Errorf("unexpected error: %v", err)
-				}
-			case tc.err:
-				t.Error("failed to return expected error")
-			case !reflect.DeepEqual(actual, tc.expected):
-				t.Errorf("actual %s != expected %s", actual, tc.expected)
-			}
-		})
-	}
-}
-
-func TestExcludeRows(t *testing.T) {
-	cases := []struct {
-		name     string
-		names    []string
-		exclude  string
-		expected []string
-		err      bool
-	}{
-		{
-			name: "basically works",
-		},
-		{
-			name:    "bad regex errors",
-			exclude: "^[a-z",
-			err:     true,
-		},
-		{
-			name:     "return all rows when nothing matches",
-			names:    []string{"hello", "world"},
-			exclude:  "dog",
-			expected: []string{"hello", "world"},
-		},
-		{
-			name:     "drop matching rows",
-			exclude:  "fun",
-			names:    []string{"apply", "function", "to", "funny", "bone"},
-			expected: []string{"apply", "to", "bone"},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var rows []*statepb.Row
-			for _, n := range tc.names {
-				rows = append(rows, &statepb.Row{Name: n})
-			}
-			actualRows, err := excludeRows(rows, tc.exclude)
-			var actual []string
-			for _, r := range actualRows {
-				actual = append(actual, r.Name)
-			}
-			switch {
-			case err != nil:
-				if !tc.err {
-					t.Errorf("unexpected error: %v", err)
-				}
-			case tc.err:
-				t.Error("failed to return expected error")
-			case !reflect.DeepEqual(actual, tc.expected):
-				t.Errorf("actual %s != expected %s", actual, tc.expected)
-			}
-		})
-	}
-
 }
 
 func TestLatestRun(t *testing.T) {
@@ -1204,6 +1521,7 @@ func TestStaleAlert(t *testing.T) {
 		mod   time.Time
 		ran   time.Time
 		dur   time.Duration
+		rows  int
 		alert bool
 	}{
 		{
@@ -1211,12 +1529,14 @@ func TestStaleAlert(t *testing.T) {
 			mod:  time.Now().Add(-5 * time.Minute),
 			ran:  time.Now().Add(-10 * time.Minute),
 			dur:  time.Hour,
+			rows: 10,
 		},
 		{
 			name:  "unmodified alerts",
 			mod:   time.Now().Add(-5 * time.Hour),
 			ran:   time.Now(),
 			dur:   time.Hour,
+			rows:  10,
 			alert: true,
 		},
 		{
@@ -1224,12 +1544,22 @@ func TestStaleAlert(t *testing.T) {
 			mod:   time.Now(),
 			ran:   time.Now().Add(-5 * time.Hour),
 			dur:   time.Hour,
+			rows:  10,
 			alert: true,
 		},
 		{
 			name:  "no runs alerts",
 			mod:   time.Now(),
 			dur:   time.Hour,
+			rows:  10,
+			alert: true,
+		},
+		{
+			name:  "no rows alerts",
+			mod:   time.Now().Add(-5 * time.Minute),
+			ran:   time.Now().Add(-10 * time.Minute),
+			dur:   time.Hour,
+			rows:  0,
 			alert: true,
 		},
 		{
@@ -1244,7 +1574,7 @@ func TestStaleAlert(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := staleAlert(tc.mod, tc.ran, tc.dur)
+			actual := staleAlert(tc.mod, tc.ran, tc.dur, tc.rows)
 			if actual != "" && !tc.alert {
 				t.Errorf("unexpected stale alert: %s", actual)
 			}
@@ -1256,20 +1586,55 @@ func TestStaleAlert(t *testing.T) {
 }
 
 func TestFailingTestSummaries(t *testing.T) {
+	defaultTemplate := &configpb.LinkTemplate{
+		Url: "http://test.com/view/<workflow-name>/<workflow-id>",
+		Options: []*configpb.LinkOptionsTemplate{
+			{
+				Key:   "test",
+				Value: "<test-name>@<test-id>",
+			},
+			{
+				Key:   "path",
+				Value: "<encode:<gcs_prefix>>",
+			},
+		},
+	}
+	defaultGcsPrefix := "my-bucket/logs/cool-job"
+	defaultColumnHeader := []*configpb.TestGroup_ColumnHeader{
+		{
+			Property: "foo",
+		},
+		{
+			Label: "hello",
+		},
+	}
 	cases := []struct {
-		name     string
-		rows     []*statepb.Row
-		expected []*summarypb.FailingTestSummary
+		name         string
+		template     *configpb.LinkTemplate
+		gcsPrefix    string
+		columnHeader []*configpb.TestGroup_ColumnHeader
+		rows         []*statepb.Row
+		expected     []*summarypb.FailingTestSummary
 	}{
 		{
-			name: "do not alert by default",
+			name:         "do not alert by default",
+			template:     defaultTemplate,
+			gcsPrefix:    defaultGcsPrefix,
+			columnHeader: defaultColumnHeader,
 			rows: []*statepb.Row{
 				{},
 				{},
 			},
 		},
 		{
-			name: "alert when rows have alerts",
+			name:      "alert when rows have alerts",
+			template:  defaultTemplate,
+			gcsPrefix: defaultGcsPrefix,
+			columnHeader: []*configpb.TestGroup_ColumnHeader{
+				{
+					Property: "foo",
+				},
+			},
 			rows: []*statepb.Row{
 				{},
 				{
@@ -1287,6 +1652,9 @@ func TestFailingTestSummaries(t *testing.T) {
 						FailureMessage:    "pop tart",
 						Properties: map[string]string{
 							"ham": "eggs",
+						},
+						CustomColumnHeaders: map[string]string{
+							"foo": "bar",
 						},
 						HotlistIds: []string{},
 					},
@@ -1311,6 +1679,9 @@ func TestFailingTestSummaries(t *testing.T) {
 							"foo":   "bar",
 							"hello": "lots",
 						},
+						CustomColumnHeaders: map[string]string{
+							"foo": "notbar",
+						},
 						HotlistIds: []string{"111", "222"},
 					},
 				},
@@ -1334,6 +1705,9 @@ func TestFailingTestSummaries(t *testing.T) {
 					Properties: map[string]string{
 						"ham": "eggs",
 					},
+					CustomColumnHeaders: map[string]string{
+						"foo": "bar",
+					},
 					HotlistIds: []string{},
 				},
 				{
@@ -1354,6 +1728,9 @@ func TestFailingTestSummaries(t *testing.T) {
 						"foo":   "bar",
 						"hello": "lots",
 					},
+					CustomColumnHeaders: map[string]string{
+						"foo": "notbar",
+					},
 					HotlistIds: []string{"111", "222"},
 				},
 			},
@@ -1362,7 +1739,7 @@ func TestFailingTestSummaries(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := failingTestSummaries(tc.rows)
+			actual := failingTestSummaries(tc.rows, tc.template, tc.gcsPrefix, tc.columnHeader)
 			if diff := cmp.Diff(tc.expected, actual, protocmp.Transform()); diff != "" {
 				t.Errorf("failingTestSummaries() (-want, +got): %s", diff)
 			}
@@ -1378,6 +1755,9 @@ func TestOverallStatus(t *testing.T) {
 		stale    string
 		broken   bool
 		alerts   bool
+		features FeatureFlags
+		colCells gridStats
+		opts     *configpb.DashboardTabStatusCustomizationOptions
 		expected summarypb.DashboardTabSummary_TabStatus
 	}{
 		{
@@ -1492,26 +1872,6 @@ func TestOverallStatus(t *testing.T) {
 			expected: summarypb.DashboardTabSummary_PASS,
 		},
 		{
-			name:   "dropped columns", // should not impact status
-			recent: 1,
-			rows: []*statepb.Row{
-				{
-					Name: "current",
-					Results: []int32{
-						int32(statuspb.TestStatus_PASS), 2,
-					},
-				},
-				{
-					Name: "ignore dropped",
-					Results: []int32{
-						int32(statuspb.TestStatus_NO_RESULT), 1,
-						int32(statuspb.TestStatus_FAIL), 1,
-					},
-				},
-			},
-			expected: summarypb.DashboardTabSummary_PASS,
-		},
-		{
 			name:   "running", // do not count as recent
 			recent: 1,
 			rows: []*statepb.Row{
@@ -1569,6 +1929,133 @@ func TestOverallStatus(t *testing.T) {
 			broken:   true,
 			expected: summarypb.DashboardTabSummary_BROKEN,
 		},
+		{
+			name:   "more runs required but flag not enabled",
+			recent: 4,
+			rows: []*statepb.Row{
+				{
+					Results: []int32{
+						int32(statuspb.TestStatus_PASS_WITH_SKIPS), 2,
+						int32(statuspb.TestStatus_FAIL), 2,
+					},
+				},
+			},
+			features: FeatureFlags{
+				AllowMinNumberOfRuns: false,
+			},
+			colCells: gridStats{
+				ignoredCols:   2,
+				completedCols: 4,
+			},
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				MinAcceptableRuns: 3,
+			},
+			expected: summarypb.DashboardTabSummary_FLAKY,
+		},
+		{
+			name:   "more runs required with flag enabled",
+			recent: 4,
+			rows: []*statepb.Row{
+				{
+					Results: []int32{
+						int32(statuspb.TestStatus_PASS_WITH_SKIPS), 2,
+						int32(statuspb.TestStatus_CATEGORIZED_ABORT), 2,
+					},
+				},
+			},
+			features: FeatureFlags{
+				AllowMinNumberOfRuns: true,
+			},
+			colCells: gridStats{
+				ignoredCols:   2,
+				completedCols: 4,
+			},
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				MinAcceptableRuns: 3,
+			},
+			expected: summarypb.DashboardTabSummary_PENDING,
+		},
+		{
+			name:   "neutral statuses ignored but flag not enabled",
+			recent: 4,
+			rows: []*statepb.Row{
+				{
+					Results: []int32{
+						int32(statuspb.TestStatus_PASS), 2,
+						int32(statuspb.TestStatus_CATEGORIZED_ABORT), 2,
+					},
+				},
+			},
+			features: FeatureFlags{
+				AllowIgnoredColumns: false,
+			},
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_CATEGORIZED_ABORT,
+					configpb.DashboardTabStatusCustomizationOptions_CANCEL,
+				},
+			},
+			expected: summarypb.DashboardTabSummary_FLAKY,
+		},
+		{
+			name:   "neutral statuses ignored with flag enabled (passes ignored)",
+			recent: 4,
+			rows: []*statepb.Row{
+				{
+					Name: "passes and aborts",
+					Results: []int32{
+						int32(statuspb.TestStatus_PASS), 2,
+						int32(statuspb.TestStatus_CATEGORIZED_ABORT), 2,
+					},
+				},
+				{
+					Name: "passes only",
+					Results: []int32{
+						int32(statuspb.TestStatus_PASS), 4,
+					},
+				},
+			},
+			features: FeatureFlags{
+				AllowIgnoredColumns: true,
+			},
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_CATEGORIZED_ABORT,
+					configpb.DashboardTabStatusCustomizationOptions_CANCEL,
+				},
+			},
+			expected: summarypb.DashboardTabSummary_PASS,
+		},
+		{
+			name:   "neutral statuses ignored with flag enabled (fails detected before ignores)",
+			recent: 4,
+			rows: []*statepb.Row{
+				{
+					Name: "passes and aborts",
+					Results: []int32{
+						int32(statuspb.TestStatus_PASS), 2,
+						int32(statuspb.TestStatus_CATEGORIZED_ABORT), 2,
+					},
+				},
+				{
+					Name: "passes and fails",
+					Results: []int32{
+						int32(statuspb.TestStatus_FAIL), 1,
+						int32(statuspb.TestStatus_PASS), 3,
+					},
+				},
+			},
+			features: FeatureFlags{
+				AllowIgnoredColumns: true,
+			},
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_CATEGORIZED_ABORT,
+					configpb.DashboardTabStatusCustomizationOptions_CANCEL,
+				},
+			},
+			expected: summarypb.DashboardTabSummary_FLAKY,
+		},
 	}
 
 	for _, tc := range cases {
@@ -1578,7 +2065,7 @@ func TestOverallStatus(t *testing.T) {
 				alerts = append(alerts, &summarypb.FailingTestSummary{})
 			}
 
-			if actual := overallStatus(&statepb.Grid{Rows: tc.rows}, tc.recent, tc.stale, tc.broken, alerts); actual != tc.expected {
+			if actual := overallStatus(&statepb.Grid{Rows: tc.rows}, tc.recent, tc.stale, tc.broken, alerts, tc.features, tc.colCells, tc.opts); actual != tc.expected {
 				t.Errorf("%s != expected %s", actual, tc.expected)
 			}
 		})
@@ -1595,11 +2082,10 @@ func TestGridMetrics(t *testing.T) {
 		cols            int
 		rows            []*statepb.Row
 		recent          int
-		passingCols     int
-		filledCols      int
-		passingCells    int
-		filledCells     int
+		features        FeatureFlags
+		opts            *configpb.DashboardTabStatusCustomizationOptions
 		brokenThreshold float32
+		expectedMetrics gridStats
 		expectedBroken  bool
 	}{
 		{
@@ -1618,11 +2104,13 @@ func TestGridMetrics(t *testing.T) {
 					Results: []int32{int32(statuspb.TestStatus_PASS), 2},
 				},
 			},
-			recent:       2,
-			passingCols:  2,
-			filledCols:   2,
-			passingCells: 4,
-			filledCells:  4,
+			recent: 2,
+			expectedMetrics: gridStats{
+				passingCols:   2,
+				completedCols: 2,
+				passingCells:  4,
+				filledCells:   4,
+			},
 		},
 		{
 			name: "red: i do not like them sam I am",
@@ -1637,11 +2125,13 @@ func TestGridMetrics(t *testing.T) {
 					Results: []int32{int32(statuspb.TestStatus_FLAKY), 2},
 				},
 			},
-			recent:       2,
-			passingCols:  0,
-			filledCols:   2,
-			passingCells: 0,
-			filledCells:  4,
+			recent: 2,
+			expectedMetrics: gridStats{
+				passingCols:   0,
+				completedCols: 2,
+				passingCells:  0,
+				filledCells:   4,
+			},
 		},
 		{
 			name: "passing cells but no green columns",
@@ -1662,11 +2152,12 @@ func TestGridMetrics(t *testing.T) {
 					},
 				},
 			},
-			recent:       2,
-			passingCols:  0,
-			filledCols:   2,
-			passingCells: 2,
-			filledCells:  4,
+			recent: 2,
+			expectedMetrics: gridStats{
+				passingCols:   0,
+				completedCols: 2,
+				passingCells:  2,
+				filledCells:   4},
 		},
 		{
 			name:   "ignore overflow of claimed columns",
@@ -1682,10 +2173,12 @@ func TestGridMetrics(t *testing.T) {
 					Results: []int32{int32(statuspb.TestStatus_PASS), 3},
 				},
 			},
-			passingCols:  3,
-			filledCols:   3,
-			passingCells: 6,
-			filledCells:  6,
+			expectedMetrics: gridStats{
+				passingCols:   3,
+				completedCols: 3,
+				passingCells:  6,
+				filledCells:   6,
+			},
 		},
 		{
 			name:   "ignore bad row data",
@@ -1700,10 +2193,12 @@ func TestGridMetrics(t *testing.T) {
 					Results: []int32{int32(statuspb.TestStatus_PASS), 2},
 				},
 			},
-			passingCols:  2,
-			filledCols:   2,
-			passingCells: 2,
-			filledCells:  2,
+			expectedMetrics: gridStats{
+				passingCols:   2,
+				completedCols: 2,
+				passingCells:  2,
+				filledCells:   2,
+			},
 		},
 		{
 			name:   "ignore non recent data",
@@ -1715,10 +2210,12 @@ func TestGridMetrics(t *testing.T) {
 					Results: []int32{int32(statuspb.TestStatus_PASS), 100},
 				},
 			},
-			passingCols:  2,
-			filledCols:   2,
-			passingCells: 2,
-			filledCells:  2,
+			expectedMetrics: gridStats{
+				passingCols:   2,
+				completedCols: 2,
+				passingCells:  2,
+				filledCells:   2,
+			},
 		},
 		{
 			name:   "no result cells do not alter column",
@@ -1751,10 +2248,12 @@ func TestGridMetrics(t *testing.T) {
 					},
 				},
 			},
-			passingCols:  2, // pass, fail, pass
-			filledCols:   3,
-			passingCells: 6,
-			filledCells:  7,
+			expectedMetrics: gridStats{
+				passingCols:   2, // pass, fail, pass
+				completedCols: 3,
+				passingCells:  6,
+				filledCells:   7,
+			},
 		},
 		{
 			name:   "not enough columns yet works just fine",
@@ -1768,10 +2267,12 @@ func TestGridMetrics(t *testing.T) {
 					},
 				},
 			},
-			passingCols:  4,
-			filledCols:   4,
-			passingCells: 4,
-			filledCells:  4,
+			expectedMetrics: gridStats{
+				passingCols:   4,
+				completedCols: 4,
+				passingCells:  4,
+				filledCells:   4,
+			},
 		},
 		{
 			name:   "half passes and half fails",
@@ -1791,10 +2292,12 @@ func TestGridMetrics(t *testing.T) {
 					},
 				},
 			},
-			passingCols:  0,
-			filledCols:   4,
-			passingCells: 4,
-			filledCells:  8,
+			expectedMetrics: gridStats{
+				passingCols:   0,
+				completedCols: 4,
+				passingCells:  4,
+				filledCells:   8,
+			},
 		},
 		{
 			name:   "no result in every column",
@@ -1817,10 +2320,12 @@ func TestGridMetrics(t *testing.T) {
 					Results: []int32{int32(statuspb.TestStatus_NO_RESULT), 3},
 				},
 			},
-			passingCols:  2,
-			filledCols:   2,
-			passingCells: 2,
-			filledCells:  2,
+			expectedMetrics: gridStats{
+				passingCols:   2,
+				completedCols: 2,
+				passingCells:  2,
+				filledCells:   2,
+			},
 		},
 		{
 			name:   "only no result",
@@ -1832,10 +2337,12 @@ func TestGridMetrics(t *testing.T) {
 					Results: []int32{int32(statuspb.TestStatus_NO_RESULT), 3},
 				},
 			},
-			passingCols:  0,
-			filledCols:   0,
-			passingCells: 0,
-			filledCells:  0,
+			expectedMetrics: gridStats{
+				passingCols:   0,
+				completedCols: 0,
+				passingCells:  0,
+				filledCells:   0,
+			},
 		},
 		{
 			name:   "Pass with skips",
@@ -1851,10 +2358,12 @@ func TestGridMetrics(t *testing.T) {
 					Results: []int32{int32(statuspb.TestStatus_PASS), 3},
 				},
 			},
-			passingCols:  3,
-			filledCols:   3,
-			passingCells: 6,
-			filledCells:  6,
+			expectedMetrics: gridStats{
+				passingCols:   3,
+				completedCols: 3,
+				passingCells:  6,
+				filledCells:   6,
+			},
 		},
 		{
 			name:   "Pass with errors",
@@ -1870,10 +2379,12 @@ func TestGridMetrics(t *testing.T) {
 					Results: []int32{int32(statuspb.TestStatus_PASS), 3},
 				},
 			},
-			passingCols:  3,
-			filledCols:   3,
-			passingCells: 6,
-			filledCells:  6,
+			expectedMetrics: gridStats{
+				passingCols:   3,
+				completedCols: 3,
+				passingCells:  6,
+				filledCells:   6,
+			},
 		},
 		{
 			name:   "All columns past threshold",
@@ -1893,10 +2404,12 @@ func TestGridMetrics(t *testing.T) {
 					},
 				},
 			},
-			passingCols:     0,
-			filledCols:      4,
-			passingCells:    4,
-			filledCells:     8,
+			expectedMetrics: gridStats{
+				passingCols:   0,
+				completedCols: 4,
+				passingCells:  4,
+				filledCells:   8,
+			},
 			brokenThreshold: .4,
 			expectedBroken:  true,
 		},
@@ -1917,11 +2430,12 @@ func TestGridMetrics(t *testing.T) {
 						int32(statuspb.TestStatus_FAIL), 4,
 					},
 				},
+			}, expectedMetrics: gridStats{
+				passingCols:   0,
+				completedCols: 4,
+				passingCells:  4,
+				filledCells:   8,
 			},
-			passingCols:     0,
-			filledCols:      4,
-			passingCells:    4,
-			filledCells:     8,
 			brokenThreshold: .6,
 			expectedBroken:  false,
 		},
@@ -1944,10 +2458,12 @@ func TestGridMetrics(t *testing.T) {
 					},
 				},
 			},
-			passingCols:     3,
-			filledCols:      4,
-			passingCells:    7,
-			filledCells:     8,
+			expectedMetrics: gridStats{
+				passingCols:   3,
+				completedCols: 4,
+				passingCells:  7,
+				filledCells:   8,
+			},
 			brokenThreshold: .4,
 			expectedBroken:  true,
 		},
@@ -1970,10 +2486,12 @@ func TestGridMetrics(t *testing.T) {
 					},
 				},
 			},
-			passingCols:     3,
-			filledCols:      4,
-			passingCells:    7,
-			filledCells:     8,
+			expectedMetrics: gridStats{
+				passingCols:   3,
+				completedCols: 4,
+				passingCells:  7,
+				filledCells:   8,
+			},
 			brokenThreshold: .6,
 			expectedBroken:  false,
 		},
@@ -2001,10 +2519,12 @@ func TestGridMetrics(t *testing.T) {
 					},
 				},
 			},
-			passingCols:     0,
-			filledCols:      4,
-			passingCells:    0,
-			filledCells:     12,
+			expectedMetrics: gridStats{
+				passingCols:   0,
+				completedCols: 4,
+				passingCells:  0,
+				filledCells:   12,
+			},
 			brokenThreshold: .6,
 			expectedBroken:  false,
 		},
@@ -2032,68 +2552,237 @@ func TestGridMetrics(t *testing.T) {
 					},
 				},
 			},
-			passingCols:     0,
-			filledCols:      4,
-			passingCells:    0,
-			filledCells:     12,
+			expectedMetrics: gridStats{
+				passingCols:   0,
+				completedCols: 4,
+				passingCells:  0,
+				filledCells:   12,
+			},
 			brokenThreshold: .6,
 			expectedBroken:  false,
+		},
+		{
+			name:   "allow ignored but no ignored test statuses",
+			cols:   4,
+			recent: 4,
+			rows: []*statepb.Row{
+				{
+					Name: "four aborts (foo)",
+					Results: []int32{
+						int32(statuspb.TestStatus_CATEGORIZED_ABORT), 4,
+					},
+				},
+				{
+					Name: "four aborts (bar)",
+					Results: []int32{
+						int32(statuspb.TestStatus_CATEGORIZED_ABORT), 4,
+					},
+				},
+			},
+			features: FeatureFlags{
+				AllowIgnoredColumns: true,
+			},
+			expectedMetrics: gridStats{
+				passingCols:   0,
+				completedCols: 4,
+				passingCells:  0,
+				filledCells:   8,
+				ignoredCols:   0,
+			},
+		},
+		{
+			name:   "allow ignored with ignored test statuses",
+			cols:   4,
+			recent: 4,
+			rows: []*statepb.Row{
+				{
+					Name: "abort with passes",
+					Results: []int32{
+						int32(statuspb.TestStatus_CATEGORIZED_ABORT), 1,
+						int32(statuspb.TestStatus_PASS), 3,
+					},
+				},
+				{
+					Name: "unknown with fails",
+					Results: []int32{
+						int32(statuspb.TestStatus_FAIL), 1,
+						int32(statuspb.TestStatus_UNKNOWN), 1,
+						int32(statuspb.TestStatus_FAIL), 2,
+					},
+				},
+			},
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_CATEGORIZED_ABORT,
+					configpb.DashboardTabStatusCustomizationOptions_UNKNOWN,
+				},
+			},
+			features: FeatureFlags{
+				AllowIgnoredColumns: true,
+			},
+			expectedMetrics: gridStats{
+				passingCols:   0,
+				completedCols: 4,
+				passingCells:  3,
+				filledCells:   8,
+				ignoredCols:   2,
+			},
+		},
+		{
+			name:   "do not allow ignored with ignored test statuses",
+			cols:   4,
+			recent: 4,
+			rows: []*statepb.Row{
+				{
+					Name: "abort with passes",
+					Results: []int32{
+						int32(statuspb.TestStatus_CATEGORIZED_ABORT), 1,
+						int32(statuspb.TestStatus_PASS), 3,
+					},
+				},
+				{
+					Name: "unknown with fails",
+					Results: []int32{
+						int32(statuspb.TestStatus_FAIL), 1,
+						int32(statuspb.TestStatus_UNKNOWN), 1,
+						int32(statuspb.TestStatus_PASS), 2,
+					},
+				},
+			},
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_CATEGORIZED_ABORT,
+					configpb.DashboardTabStatusCustomizationOptions_UNKNOWN,
+				},
+			},
+			features: FeatureFlags{
+				AllowIgnoredColumns: false,
+			},
+			expectedMetrics: gridStats{
+				passingCols:   3,
+				completedCols: 4,
+				passingCells:  5,
+				filledCells:   8,
+				ignoredCols:   0,
+			},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			expected := makeShim(tc.passingCols, tc.filledCols, tc.passingCells, tc.filledCells, tc.expectedBroken)
-			actual := makeShim(gridMetrics(tc.cols, tc.rows, tc.recent, tc.brokenThreshold))
-			assert.Equal(t, expected, actual, fmt.Sprintf("%s != expected %s", actual, expected))
+			if actualMetrics, actualBroken := gridMetrics(tc.cols, tc.rows, tc.recent, tc.brokenThreshold, tc.features, tc.opts); actualMetrics != tc.expectedMetrics || actualBroken != tc.expectedBroken {
+				t.Errorf("%v: gridMetrics() = %v, %v, want %v, %v", tc.name, actualMetrics, actualBroken, tc.expectedMetrics, tc.expectedBroken)
+			}
 		})
 	}
 }
 
 func TestStatusMessage(t *testing.T) {
 	cases := []struct {
-		name             string
-		passingCols      int
-		completedCols    int
-		passingCells     int
-		filledCells      int
-		expectedOverride string
+		name     string
+		colCells gridStats
+		status   summarypb.DashboardTabSummary_TabStatus
+		opts     *configpb.DashboardTabStatusCustomizationOptions
+		want     string
 	}{
 		{
-			name:             "no filledCells",
-			expectedOverride: noRuns,
+			name: "no filledCells",
+			want: noRuns,
 		},
 		{
-			name:          "green path",
-			passingCols:   2,
-			completedCols: 2,
-			passingCells:  4,
-			filledCells:   4,
+			name: "green path",
+			colCells: gridStats{
+				passingCols:   2,
+				completedCols: 2,
+				passingCells:  4,
+				filledCells:   4,
+			},
+			want: "Tab stats: 2 of 2 (100.0%) recent columns passed (4 of 4 or 100.0% cells)",
 		},
 		{
-			name:          "all red path",
-			passingCols:   0,
-			completedCols: 2,
-			passingCells:  0,
-			filledCells:   4,
+			name: "all red path",
+			colCells: gridStats{
+				passingCols:   0,
+				completedCols: 2,
+				passingCells:  0,
+				filledCells:   4,
+			},
+			want: "Tab stats: 0 of 2 (0.0%) recent columns passed (0 of 4 or 0.0% cells)",
 		},
 		{
-			name:          "all values the same",
-			passingCols:   2,
-			completedCols: 2,
-			passingCells:  2,
-			filledCells:   2,
+			name: "all values the same",
+			colCells: gridStats{
+				passingCols:   2,
+				completedCols: 2,
+				passingCells:  2,
+				filledCells:   2,
+			},
+			want: "Tab stats: 2 of 2 (100.0%) recent columns passed (2 of 2 or 100.0% cells)",
+		},
+		{
+			name: "acceptably flaky without ignored columns",
+			colCells: gridStats{
+				passingCols:   3,
+				completedCols: 4,
+				passingCells:  6,
+				filledCells:   8,
+			},
+			status: summarypb.DashboardTabSummary_ACCEPTABLE,
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				MaxAcceptableFlakiness: 50,
+			},
+			want: "Tab stats: 3 of 4 (75.0%) recent columns passed (6 of 8 or 75.0% cells)\nStatus info: Recent flakiness (25.0%) over valid columns is within configured acceptable level of 50.0%.",
+		},
+		{
+			name: "acceptably flaky with ignored columns",
+			colCells: gridStats{
+				passingCols:   2,
+				completedCols: 4,
+				ignoredCols:   1,
+				passingCells:  4,
+				filledCells:   8,
+			},
+			status: summarypb.DashboardTabSummary_ACCEPTABLE,
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				MaxAcceptableFlakiness: 50,
+			},
+			want: "Tab stats: 2 of 4 (50.0%) recent columns passed (4 of 8 or 50.0% cells). 1 columns ignored\nStatus info: Recent flakiness (33.3%) over valid columns is within configured acceptable level of 50.0%.",
+		},
+		{
+			name: "pending tab status without ignored columns",
+			colCells: gridStats{
+				passingCols:   2,
+				completedCols: 3,
+				passingCells:  4,
+				filledCells:   6,
+			},
+			status: summarypb.DashboardTabSummary_PENDING,
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				MinAcceptableRuns: 4,
+			},
+			want: "Tab stats: 2 of 3 (66.7%) recent columns passed (4 of 6 or 66.7% cells)\nStatus info: Not enough runs",
+		},
+		{
+			name: "pending tab status with ignored columns",
+			colCells: gridStats{
+				passingCols:   2,
+				completedCols: 3,
+				ignoredCols:   1,
+				passingCells:  4,
+				filledCells:   6,
+			},
+			status: summarypb.DashboardTabSummary_PENDING,
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				MinAcceptableRuns: 4,
+			},
+			want: "Tab stats: 2 of 3 (66.7%) recent columns passed (4 of 6 or 66.7% cells). 1 columns ignored\nStatus info: Not enough runs",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			expected := tc.expectedOverride
-			if expected == "" {
-				expected = fmtStatus(tc.passingCols, tc.completedCols, tc.passingCells, tc.filledCells)
-			}
-			if actual := statusMessage(tc.passingCols, tc.completedCols, tc.passingCells, tc.filledCells); actual != expected {
-				t.Errorf("%s != expected %s", actual, expected)
+			if actual := statusMessage(tc.colCells, tc.status, tc.opts); actual != tc.want {
+				t.Errorf("%v: statusMessage() = %q, want %q", tc.name, actual, tc.want)
 			}
 		})
 	}
@@ -2561,34 +3250,22 @@ func TestResultIter(t *testing.T) {
 				statuspb.TestStatus_PASS,
 			},
 		},
-		{
-			name: "cancel aborts early",
-			in: []int32{
-				int32(statuspb.TestStatus_PASS), 50,
-			},
-			cancel: 2,
-			expected: []statuspb.TestStatus{
-				statuspb.TestStatus_PASS,
-				statuspb.TestStatus_PASS,
-			},
-		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			out := resultIter(ctx, tc.in)
+			iter := result.Iter(tc.in)
 			var actual []statuspb.TestStatus
 			var idx int
-			for val := range out {
-				idx++
-				if tc.cancel > 0 && idx == tc.cancel {
-					cancel()
+			for {
+				val, ok := iter()
+				if !ok {
+					return
 				}
+				idx++
 				actual = append(actual, val)
 			}
-			if !reflect.DeepEqual(actual, tc.expected) {
+			if !cmp.Equal(actual, tc.expected, protocmp.Transform()) {
 				t.Errorf("%s != expected %s", actual, tc.expected)
 			}
 		})
@@ -2635,7 +3312,7 @@ func TestSummaryPath(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := summaryPath(tc.path, tc.prefix, tc.dash)
+			got, err := SummaryPath(tc.path, tc.prefix, tc.dash)
 			switch {
 			case err != nil:
 				if !tc.err {
@@ -2647,6 +3324,186 @@ func TestSummaryPath(t *testing.T) {
 				if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(gcs.Path{})); diff != "" {
 					t.Errorf("summaryPath(%q, %q, %q) got unexpected diff (-want +got):\n%s", tc.path, tc.prefix, tc.dash, diff)
 				}
+			}
+		})
+	}
+}
+
+func TestTestResultLink(t *testing.T) {
+	cases := []struct {
+		name                   string
+		template               *configpb.LinkTemplate
+		properties             map[string]string
+		testID                 string
+		target                 string
+		buildID                string
+		gcsPrefix              string
+		propertyToColumnHeader map[string]string
+		customColumnHeaders    map[string]string
+		want                   string
+	}{
+		{
+			name: "nil",
+			want: "",
+		},
+		{
+			name: "empty",
+			template: &configpb.LinkTemplate{
+				Url: "https://test.com/<encode:<workflow-name>>/<workflow-id>/<test-id>/<encode:<test-name>>",
+				Options: []*configpb.LinkOptionsTemplate{
+					{
+						Key:   "prefix",
+						Value: "<gcs-prefix>",
+					},
+					{
+						Key:   "build",
+						Value: "<build-id>",
+					},
+					{
+						Key:   "prop",
+						Value: "<my-prop>",
+					},
+					{
+						Key:   "foo",
+						Value: "<custom-0>",
+					},
+				},
+			},
+			properties:             map[string]string{},
+			testID:                 "",
+			target:                 "",
+			buildID:                "",
+			gcsPrefix:              "",
+			propertyToColumnHeader: map[string]string{},
+			customColumnHeaders:    map[string]string{},
+			want:                   "https://test.com/%3Cencode:%3Cworkflow-name%3E%3E/%3Cworkflow-id%3E//?build=&foo=%3Ccustom-0%3E&prefix=&prop=%3Cmy-prop%3E",
+		},
+		{
+			name:     "empty template",
+			template: &configpb.LinkTemplate{},
+			properties: map[string]string{
+				"workflow-id":   "workflow-id-1",
+				"workflow-name": "//my:workflow",
+				"my-prop":       "foo",
+			},
+			testID:    "my-test-id-1",
+			target:    "//path/to:my-test",
+			buildID:   "build-1",
+			gcsPrefix: "my-bucket/has/results",
+			propertyToColumnHeader: map[string]string{
+				"<custom-0>": "apple",
+			},
+			customColumnHeaders: map[string]string{
+				"apple": "fruit",
+			},
+			want: "",
+		},
+		{
+			name: "basically works",
+			template: &configpb.LinkTemplate{
+				Url: "https://test.com/<encode:<workflow-name>>/<workflow-id>/<test-id>/<encode:<test-name>>",
+				Options: []*configpb.LinkOptionsTemplate{
+					{
+						Key:   "prefix",
+						Value: "<gcs-prefix>",
+					},
+					{
+						Key:   "build",
+						Value: "<build-id>",
+					},
+					{
+						Key:   "prop",
+						Value: "<my-prop>",
+					},
+					{
+						Key:   "foo",
+						Value: "<custom-0>",
+					},
+					{
+						Key:   "hello",
+						Value: "<custom-1>",
+					},
+				},
+			},
+			properties: map[string]string{
+				"workflow-id":   "workflow-id-1",
+				"workflow-name": "//my:workflow",
+				"my-prop":       "foo",
+			},
+			testID:    "my-test-id-1",
+			target:    "//path/to:my-test",
+			buildID:   "build-1",
+			gcsPrefix: "my-bucket/has/results",
+			propertyToColumnHeader: map[string]string{
+				"<custom-0>": "foo",
+				"<custom-1>": "hello",
+			},
+			customColumnHeaders: map[string]string{
+				"foo":   "bar",
+				"hello": "world",
+			},
+			want: "https://test.com/%2F%2Fmy:workflow/workflow-id-1/my-test-id-1/%2F%2Fpath%2Fto:my-test?build=build-1&foo=bar&hello=world&prefix=my-bucket%2Fhas%2Fresults&prop=foo",
+		},
+		{
+			name: "non-matching tokens",
+			template: &configpb.LinkTemplate{
+				Url: "https://test.com/<greeting>",
+				Options: []*configpb.LinkOptionsTemplate{
+					{
+						Key:   "farewell",
+						Value: "<farewell>",
+					},
+					{
+						Key:   "bye",
+						Value: "<custom-0>",
+					},
+				},
+			},
+			properties: map[string]string{
+				"workflow-id":   "workflow-id-1",
+				"workflow-name": "//my:workflow",
+				"my-prop":       "foo",
+			},
+			propertyToColumnHeader: map[string]string{
+				"<custom-0>": "bye",
+			},
+			customColumnHeaders: map[string]string{
+				"foo": "bar",
+			},
+			testID:    "my-test-id-1",
+			target:    "//path/to:my-test",
+			buildID:   "build-1",
+			gcsPrefix: "my-bucket/has/results",
+			want:      "https://test.com/%3Cgreeting%3E?bye=%3Ccustom-0%3E&farewell=%3Cfarewell%3E",
+		},
+		{
+			name: "basically works, nil properties",
+			template: &configpb.LinkTemplate{
+				Url: "https://test.com/<encode:<workflow-name>>/<workflow-id>/<test-id>/<encode:<test-name>>",
+				Options: []*configpb.LinkOptionsTemplate{
+					{
+						Key:   "prefix",
+						Value: "<gcs-prefix>",
+					},
+					{
+						Key:   "build",
+						Value: "<build-id>",
+					},
+				},
+			},
+			properties: nil,
+			testID:     "my-test-id-1",
+			target:     "//path/to:my-test",
+			buildID:    "build-1",
+			gcsPrefix:  "my-bucket/has/results",
+			want:       "https://test.com/%3Cencode:%3Cworkflow-name%3E%3E/%3Cworkflow-id%3E/my-test-id-1///path/to:my-test?build=build-1&prefix=my-bucket%2Fhas%2Fresults",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := testResultLink(tc.template, tc.properties, tc.testID, tc.target, tc.buildID, tc.gcsPrefix, tc.propertyToColumnHeader, tc.customColumnHeaders); got != tc.want {
+				t.Errorf("testResultLink(%v, %v, %s, %s, %s, %s, %s, %s) = %q, want %q", tc.template, tc.properties, tc.testID, tc.target, tc.buildID, tc.gcsPrefix, tc.propertyToColumnHeader, tc.customColumnHeaders, got, tc.want)
 			}
 		})
 	}

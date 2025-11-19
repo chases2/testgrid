@@ -19,9 +19,11 @@ package result
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"reflect"
 	"testing"
 
+	configpb "github.com/GoogleCloudPlatform/testgrid/pb/config"
 	statuspb "github.com/GoogleCloudPlatform/testgrid/pb/test_status"
 )
 
@@ -132,6 +134,109 @@ func TestFailing(t *testing.T) {
 	}
 }
 
+func TestIgnored(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   statuspb.TestStatus
+		opts     *configpb.DashboardTabStatusCustomizationOptions
+		expected bool
+	}{
+		{
+			name:   "categorized abort ignored",
+			status: statuspb.TestStatus_CATEGORIZED_ABORT,
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_CATEGORIZED_ABORT,
+				},
+			},
+			expected: true,
+		},
+		{
+			name:   "categorized abort not ignored",
+			status: statuspb.TestStatus_CATEGORIZED_ABORT,
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_UNKNOWN,
+					configpb.DashboardTabStatusCustomizationOptions_BLOCKED,
+				},
+			},
+		},
+		{
+			name:   "unknown ignored",
+			status: statuspb.TestStatus_UNKNOWN,
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_UNKNOWN,
+					configpb.DashboardTabStatusCustomizationOptions_CANCEL,
+				},
+			},
+			expected: true,
+		},
+		{
+			name:   "unknown not ignored",
+			status: statuspb.TestStatus_UNKNOWN,
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_BLOCKED,
+					configpb.DashboardTabStatusCustomizationOptions_CANCEL,
+				},
+			},
+		},
+		{
+			name:   "cancel ignored",
+			status: statuspb.TestStatus_CANCEL,
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_CANCEL,
+					configpb.DashboardTabStatusCustomizationOptions_BLOCKED,
+				},
+			},
+			expected: true,
+		},
+		{
+			name:   "cancel not ignored",
+			status: statuspb.TestStatus_CANCEL,
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_BLOCKED,
+				},
+			},
+		},
+		{
+			name:   "blocked ignored",
+			status: statuspb.TestStatus_BLOCKED,
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_CANCEL,
+					configpb.DashboardTabStatusCustomizationOptions_BLOCKED,
+				},
+			},
+			expected: true,
+		},
+		{
+			name:   "blocked not ignored",
+			status: statuspb.TestStatus_BLOCKED,
+			opts: &configpb.DashboardTabStatusCustomizationOptions{
+				IgnoredTestStatuses: []configpb.DashboardTabStatusCustomizationOptions_IgnoredTestStatus{
+					configpb.DashboardTabStatusCustomizationOptions_CANCEL,
+				},
+			},
+		},
+		{
+			name:   "ignored statuses not set",
+			status: statuspb.TestStatus_BLOCKED,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if actual := Ignored(tc.status, tc.opts); actual != tc.expected {
+				t.Errorf("Ignored(%v) got %t, want %t", tc.status, actual, tc.expected)
+			}
+		})
+	}
+}
+
 func TestCoalesce(t *testing.T) {
 	cases := []struct {
 		status        statuspb.TestStatus
@@ -230,19 +335,6 @@ func TestIter(t *testing.T) {
 				statuspb.TestStatus_FLAKY,
 			},
 		},
-		{
-			name: "honor cancelled context",
-			ctx: func() context.Context {
-				ctx, cancel := context.WithCancel(context.Background())
-				cancel()
-				return ctx
-			}(),
-			results: []int32{
-				stoi(statuspb.TestStatus_FAIL), 1,
-				stoi(statuspb.TestStatus_PASS), 2,
-				stoi(statuspb.TestStatus_FLAKY), 3,
-			},
-		},
 	}
 
 	for _, tc := range cases {
@@ -251,11 +343,109 @@ func TestIter(t *testing.T) {
 				tc.ctx = context.Background()
 			}
 			var actual []statuspb.TestStatus
-			for item := range Iter(tc.ctx, tc.results) {
+			f := Iter(tc.results)
+			for {
+				item, more := f()
+				if !more {
+					break
+				}
 				actual = append(actual, item)
 			}
 			if !reflect.DeepEqual(actual, tc.expected) {
 				t.Errorf("Iter(%v) got %v, want %v", tc.results, actual, tc.expected)
+			}
+		})
+	}
+}
+
+const totalResults = 10e6
+
+func benchmarkResults(remain int32) []int32 {
+	rand.Seed(42)
+
+	var statuses []int32
+	for num := range statuspb.TestStatus_name {
+		statuses = append(statuses, num)
+	}
+	var results []int32
+	n := int32(len(statuses))
+	for remain > 0 {
+		result := rand.Int31() % n
+		count := rand.Int31() % 100
+		if count > remain {
+			count = remain
+		}
+		results = append(results, result, count)
+		remain -= count
+	}
+	return results
+}
+
+func BenchmarkIter(b *testing.B) {
+
+	loopCh := func(results []int32) int32 {
+		var n int32
+		ch := iterSlow(context.Background(), results)
+		for range ch {
+			n++
+		}
+		return n
+	}
+
+	loopF := func(results []int32) int32 {
+		var n int32
+		f := iterFast(results)
+		for {
+			_, more := f()
+			if !more {
+				break
+			}
+			n++
+		}
+		return n
+	}
+
+	const (
+		few  = 1e6
+		many = 10e6
+	)
+
+	cases := []struct {
+		name    string
+		results int32
+		loop    func([]int32) int32
+	}{
+		{
+			name:    "few chan",
+			results: few,
+			loop:    loopCh,
+		},
+		{
+			name:    "few func",
+			results: few,
+			loop:    loopF,
+		},
+		{
+			name:    "many chan",
+			results: many,
+			loop:    loopCh,
+		},
+		{
+			name:    "many func",
+			results: many,
+			loop:    loopF,
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			results := benchmarkResults(int32(tc.results))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				n := tc.loop(results)
+				if n != tc.results {
+					b.Fatalf("Got %d results, wanted %d", n, tc.results)
+				}
 			}
 		})
 	}

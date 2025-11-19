@@ -19,6 +19,7 @@ package result
 import (
 	"context"
 
+	configpb "github.com/GoogleCloudPlatform/testgrid/pb/config"
 	statepb "github.com/GoogleCloudPlatform/testgrid/pb/state"
 	statuspb "github.com/GoogleCloudPlatform/testgrid/pb/test_status"
 )
@@ -73,6 +74,20 @@ func Failing(rowResult statuspb.TestStatus) bool {
 	return GTE(rowResult, statuspb.TestStatus_TOOL_FAIL) && LTE(rowResult, statuspb.TestStatus_FAIL)
 }
 
+// Ignored returns true if the test status is any ignored status,
+// configured via Config > DashboardTab > DashboardTabStatusCustomizationOptions > IgnoredTestStatuses
+func Ignored(rowResult statuspb.TestStatus, opts *configpb.DashboardTabStatusCustomizationOptions) bool {
+	for _, ignoredStatus := range opts.GetIgnoredTestStatuses() {
+		if (ignoredStatus == configpb.DashboardTabStatusCustomizationOptions_CATEGORIZED_ABORT && rowResult == statuspb.TestStatus_CATEGORIZED_ABORT) ||
+			(ignoredStatus == configpb.DashboardTabStatusCustomizationOptions_UNKNOWN && rowResult == statuspb.TestStatus_UNKNOWN) ||
+			(ignoredStatus == configpb.DashboardTabStatusCustomizationOptions_CANCEL && rowResult == statuspb.TestStatus_CANCEL) ||
+			(ignoredStatus == configpb.DashboardTabStatusCustomizationOptions_BLOCKED && rowResult == statuspb.TestStatus_BLOCKED) {
+			return true
+		}
+	}
+	return false
+}
+
 // Coalesce reduces the result to PASS, NO_RESULT, FAIL, FLAKY or UNKNOWN.
 func Coalesce(result statuspb.TestStatus, ignoreRunning bool) statuspb.TestStatus {
 	// TODO(fejta): other result types, not used by k8s testgrid
@@ -91,8 +106,7 @@ func Coalesce(result statuspb.TestStatus, ignoreRunning bool) statuspb.TestStatu
 	return statuspb.TestStatus_UNKNOWN
 }
 
-// Iter returns a channel that outputs the result for each column, decoding the run-length-encoding.
-func Iter(ctx context.Context, results []int32) <-chan statuspb.TestStatus {
+func iterSlow(ctx context.Context, results []int32) <-chan statuspb.TestStatus {
 	out := make(chan statuspb.TestStatus)
 	go func() {
 		defer close(out)
@@ -122,11 +136,42 @@ func Iter(ctx context.Context, results []int32) <-chan statuspb.TestStatus {
 	return out
 }
 
+// Iter returns a function that returns the result for each column, decoding the run-length-encoding.
+func Iter(results []int32) IterFunc {
+	return iterFast(results)
+}
+
+func iterFast(results []int32) IterFunc {
+	var i int
+	n := len(results)
+	var more int32
+	var status statuspb.TestStatus
+	return func() (statuspb.TestStatus, bool) {
+		for {
+			if more > 0 {
+				more--
+				return status, true
+			}
+			if i+1 >= n {
+				return statuspb.TestStatus_NO_RESULT, false
+			}
+			status = statuspb.TestStatus(results[i])
+			more = results[i+1]
+			i += 2
+		}
+	}
+}
+
+// IterFunc returns a result for each column (and then !ok).
+//
+// This decodes the run-length-encoding for a row's results.
+type IterFunc func() (result statuspb.TestStatus, ok bool)
+
 // Map returns a per-column result output channel for each row.
-func Map(ctx context.Context, rows []*statepb.Row) map[string]<-chan statuspb.TestStatus {
-	iters := map[string]<-chan statuspb.TestStatus{}
+func Map(rows []*statepb.Row) map[string]IterFunc {
+	iters := map[string]IterFunc{}
 	for _, r := range rows {
-		iters[r.Name] = Iter(ctx, r.Results)
+		iters[r.Name] = Iter(r.Results)
 	}
 	return iters
 }

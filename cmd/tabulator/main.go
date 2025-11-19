@@ -40,11 +40,12 @@ type options struct {
 	persistQueue        gcs.Path
 	creds               string
 	confirm             bool
-	dropEmptyCols       bool
 	useTabAlertSettings bool
 	calculateStats      bool
+	extendState         bool
 	groups              util.Strings
-	concurrency         int
+	readConcurrency     int
+	writeConcurrency    int
 	wait                time.Duration
 	gridPathPrefix      string
 	tabStatePathPrefix  string
@@ -60,8 +61,11 @@ func (o *options) validate() error {
 	if o.config.String() == "" {
 		return errors.New("empty --config")
 	}
-	if o.concurrency < 1 {
-		o.concurrency = 4 * runtime.NumCPU()
+	if o.writeConcurrency < 1 {
+		o.writeConcurrency = 4 * runtime.NumCPU()
+	}
+	if o.readConcurrency < 1 {
+		o.readConcurrency = (o.writeConcurrency / 2) + 1
 	}
 
 	return nil
@@ -76,10 +80,13 @@ func gatherOptions() options {
 	flag.StringVar(&o.creds, "gcp-service-account", "", "/path/to/gcp/creds (use local creds if empty)")
 	flag.BoolVar(&o.confirm, "confirm", false, "Upload data if set")
 	flag.Var(&o.groups, "group", "Only update named test group if set (repeateable)")
-	flag.BoolVar(&o.dropEmptyCols, "filter-columns", false, "Drops empty columns after filtering") // TODO(chases2): Enable, then remove flag
 	flag.BoolVar(&o.useTabAlertSettings, "tab-alerts", false, "Use newer tab settings while caculating alerts")
-	flag.BoolVar(&o.calculateStats, "column-stats", false, "Calculates stats for broken columns")
-	flag.IntVar(&o.concurrency, "concurrency", 0, "Manually define the number of groups to concurrently update if non-zero")
+	flag.BoolVar(&o.calculateStats, "column-stats", true, "Calculates stats for broken columns")
+	flag.BoolVar(&o.extendState, "extend", false, "Extend tab state instead of replacing it")
+
+	flag.IntVar(&o.readConcurrency, "read-concurrency", 0, "Manually define the number of groups to read and hold in memory at once if non-zero")
+	flag.IntVar(&o.writeConcurrency, "concurrency", 0, "Manually define the number of tabs to concurrently update if non-zero")
+	flag.IntVar(&o.writeConcurrency, "write-concurrency", 0, "alias for --concurrency")
 	flag.DurationVar(&o.wait, "wait", 0, "Ensure at least this much time has passed since the last loop (exit if zero).")
 
 	flag.StringVar(&o.gridPathPrefix, "grid-path", "grid", "Read grid states under this GCS path.")
@@ -126,7 +133,8 @@ func main() {
 	client := gcs.NewClient(storageClient)
 
 	logrus.WithFields(logrus.Fields{
-		"group": opt.concurrency,
+		"read":  opt.readConcurrency,
+		"write": opt.writeConcurrency,
 	}).Info("Configured concurrency")
 
 	fixers := make([]tabulator.Fixer, 0, 2)
@@ -147,7 +155,21 @@ func main() {
 
 	mets := tabulator.CreateMetrics(prometheus.NewFactory())
 
-	if err := tabulator.Update(ctx, client, mets, opt.config, opt.concurrency, opt.gridPathPrefix, opt.tabStatePathPrefix, opt.groups.Strings(), opt.confirm, opt.dropEmptyCols, opt.calculateStats, opt.useTabAlertSettings, opt.wait, fixers...); err != nil {
+	opts := &tabulator.UpdateOptions{
+		ConfigPath:          opt.config,
+		ReadConcurrency:     opt.readConcurrency,
+		WriteConcurrency:    opt.writeConcurrency,
+		GridPathPrefix:      opt.gridPathPrefix,
+		TabsPathPrefix:      opt.tabStatePathPrefix,
+		AllowedGroups:       opt.groups.Strings(),
+		Confirm:             opt.confirm,
+		CalculateStats:      opt.calculateStats,
+		UseTabAlertSettings: opt.useTabAlertSettings,
+		ExtendState:         opt.extendState,
+		Freq:                opt.wait,
+	}
+
+	if err := tabulator.Update(ctx, client, mets, opts, fixers...); err != nil {
 		logrus.WithError(err).Error("Could not tabulate")
 	}
 }
