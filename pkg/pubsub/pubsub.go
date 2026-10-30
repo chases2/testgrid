@@ -89,6 +89,7 @@ func (n Notification) String() string {
 // Connects to the specified subscription with optionally specified settings.
 // Receives pubsub messages from this subscription and converts it into a Notification struct.
 //   - Nacks any message it cannot parse.
+//
 // Sends the notification to the receivers channel.
 //   - Nacks messages associated with any unsent Notifications.
 //   - Acks as soon as the Notification is sent.
@@ -135,7 +136,7 @@ func sendToReceivers(ctx context.Context, log logrus.FieldLogger, send Sender, r
 				"time": msg.Attributes[keyTime],
 				"id":   msg.ID,
 			}).Error("Failed to parse time")
-			result.Nack(msg)
+			result.Ack(msg)
 			return
 		}
 		gen, err := strconv.ParseInt(msg.Attributes[keyGeneration], 10, 64)
@@ -144,7 +145,7 @@ func sendToReceivers(ctx context.Context, log logrus.FieldLogger, send Sender, r
 				"generation": msg.Attributes[keyGeneration],
 				"id":         msg.ID,
 			}).Error("Failed to parse generation")
-			result.Nack(msg)
+			result.Ack(msg)
 			return
 		}
 		notice := Notification{

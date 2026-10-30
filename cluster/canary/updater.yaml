@@ -30,7 +30,7 @@ spec:
       serviceAccountName: updater
       containers:
       - name: updater
-        image: gcr.io/k8s-testgrid/updater:v20230926-v0.0.165-24-ge8c030e5 
+        image: gcr.io/k8s-testgrid/updater:v20261029-v0.0.177-4-g2bbb98db 
         ports:
         - name: metrics
           containerPort: 2112
@@ -46,6 +46,7 @@ spec:
         - --subscribe=kubernetes-jenkins=kubernetes-jenkins/testgrid-canary
         - --subscribe=oss-prow=k8s-testgrid/testgrid-canary
         - --subscribe=istio-prow=k8s-testgrid/testgrid-canary
+        - --subscribe=kubernetes-ci-logs=k8s-testgrid/testgrid-canary-kubernetes-ci-logs
         - --wait=4h
         resources:
           requests:
